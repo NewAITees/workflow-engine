@@ -1,0 +1,19 @@
+# Workflow Engine Configuration
+# Copy this file to repos.yml and customize
+
+repositories:
+  # Example: Configure a repository for the workflow
+  - name: owner/repo-name
+    poll_interval: 300      # Seconds between checks (default: 300)
+    work_dir: ~/.workflow-engine/workspaces  # Where to clone repos
+    llm_backend: codex      # "codex" (default) or "claude"
+    codex_cli: codex        # Path to Codex CLI
+    claude_cli: claude      # Path to Claude Code CLI
+    gh_cli: gh              # Path to GitHub CLI
+    log_level: INFO         # Logging level
+
+  # Example with Claude backend
+  # - name: myorg/myproject
+  #   llm_backend: claude   # Use Claude Code instead of Codex
+  #   poll_interval: 60     # Check more frequently
+  #   log_level: DEBUG

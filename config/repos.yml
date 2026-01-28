@@ -1,0 +1,11 @@
+# Workflow Engine Configuration
+
+repositories:
+  - name: NewAITees/aituber_test
+    poll_interval: 30         # Check every 30 seconds for testing
+    work_dir: ~/.workflow-engine/workspaces
+    llm_backend: codex        # Use Codex CLI
+    codex_cli: C:\Users\perso\AppData\Roaming\npm\codex.cmd
+    claude_cli: claude
+    gh_cli: gh
+    log_level: INFO
