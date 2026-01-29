@@ -459,3 +459,24 @@ class GitHubClient:
         """Check if all CI checks have passed."""
         result = self.get_pr_checks(pr_number)
         return result["all_passed"]
+
+    def get_pr_reviews(self, pr_number: int) -> list[dict]:
+        """Get reviews for a pull request."""
+        args = [
+            "api",
+            f"/repos/{self.repo}/pulls/{pr_number}/reviews",
+            "--jq",
+            ".[] | {id: .id, state: .state, body: .body, submitted_at: .submitted_at}",
+        ]
+        result = self._run(args, check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+
+        reviews = []
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                try:
+                    reviews.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        return reviews
