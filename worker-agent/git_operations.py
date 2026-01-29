@@ -74,8 +74,12 @@ class GitOperations:
             default_branch = self.get_default_branch()
             self._run(["fetch", "origin"], check=False)
             self._run(["checkout", default_branch], check=False)
-            self._run(["reset", "--hard", f"origin/{default_branch}"])
-            self._run(["clean", "-fd"])
+            reset = self._run(["reset", "--hard", f"origin/{default_branch}"], check=False)
+            if not reset.success:
+                return reset
+            clean = self._run(["clean", "-fd"], check=False)
+            if not clean.success:
+                return clean
             return self._run(["pull"])
         else:
             logger.info(f"Cloning repository to: {self.workspace}")
@@ -98,8 +102,12 @@ class GitOperations:
         default_branch = self.get_default_branch()
 
         # Ensure we're on the default branch first
-        self._run(["checkout", default_branch])
-        self._run(["pull"])
+        result = self._run(["checkout", default_branch])
+        if not result.success:
+            return result
+        result = self._run(["pull"])
+        if not result.success:
+            return result
 
         # Delete branch if it exists locally
         self._run(["branch", "-D", branch_name], check=False)
