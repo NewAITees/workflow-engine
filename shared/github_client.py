@@ -453,9 +453,9 @@ class GitHubClient:
         if not checks:
             return {"checks": [], "all_passed": True}
 
-        # Check if all checks have passed
+        # Check if all checks have passed (case-insensitive)
         all_passed = all(
-            c.get("state") == "success"
+            c.get("state", "").upper() == "SUCCESS"
             for c in checks
         )
 
