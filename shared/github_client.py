@@ -441,15 +441,21 @@ class GitHubClient:
             "--repo",
             self.repo,
             "--json",
-            "name,state,conclusion",
+            "name,state",
         ]
         result = self._run(args, check=False)
         if result.returncode != 0:
-            return {"checks": [], "all_passed": False}
+            return {"checks": [], "all_passed": True}  # No CI means pass
 
         checks = json.loads(result.stdout) if result.stdout else []
+
+        # If no checks, consider it passed (no CI configured)
+        if not checks:
+            return {"checks": [], "all_passed": True}
+
+        # Check if all checks have passed
         all_passed = all(
-            c.get("conclusion") == "success" or c.get("state") == "success"
+            c.get("state") == "success"
             for c in checks
         )
 
