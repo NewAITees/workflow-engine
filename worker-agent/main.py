@@ -15,9 +15,8 @@ from pathlib import Path
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from git_operations import GitOperations
-
 from shared.config import get_agent_config
+from shared.git_operations import GitOperations
 from shared.github_client import GitHubClient, Issue, PullRequest
 from shared.llm_client import LLMClient
 from shared.lock import LockManager

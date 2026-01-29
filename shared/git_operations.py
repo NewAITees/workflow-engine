@@ -20,20 +20,33 @@ class GitResult:
 class GitOperations:
     """Git operations for implementing features."""
 
-    def __init__(self, repo: str, work_base: Path):
+    def __init__(
+        self,
+        repo: str,
+        work_base: Path | None = None,
+        workspace_path: Path | None = None,
+    ):
         """
         Initialize git operations.
 
         Args:
             repo: Repository in owner/repo format
-            work_base: Base directory for workspaces
+            work_base: Base directory for workspaces (auto-generates workspace path)
+            workspace_path: Explicit path to workspace (overrides work_base)
         """
         self.repo = repo
-        self.work_base = Path(work_base)
-        self.work_base.mkdir(parents=True, exist_ok=True)
 
-        # Workspace for this repo
-        self.workspace = self.work_base / repo.replace("/", "_")
+        if workspace_path:
+            self.workspace = Path(workspace_path)
+            # If explicit path is given, work_base might not be set or relevant,
+            # but we assume the parent is the base if needed.
+            self.work_base = self.workspace.parent
+        elif work_base:
+            self.work_base = Path(work_base)
+            self.work_base.mkdir(parents=True, exist_ok=True)
+            self.workspace = self.work_base / repo.replace("/", "_")
+        else:
+            raise ValueError("Either work_base or workspace_path must be provided")
 
     def _run(
         self,
@@ -149,6 +162,22 @@ class GitOperations:
         self._run(["checkout", default_branch], check=False)
         self._run(["branch", "-D", branch_name], check=False)
         self._run(["push", "origin", "--delete", branch_name], check=False)
+
+    def worktree_add(self, path: Path, branch: str) -> GitResult:
+        """Add a new worktree."""
+        # Ensure path parent exists
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # git worktree add <path> <branch>
+        return self._run(["worktree", "add", str(path), branch])
+
+    def worktree_remove(self, path: Path) -> GitResult:
+        """Remove a worktree."""
+        # git worktree remove <path>
+        return self._run(["worktree", "remove", str(path)])
+
+    def worktree_prune(self) -> GitResult:
+        """Prune worktree information."""
+        return self._run(["worktree", "prune"])
 
     @property
     def path(self) -> Path:

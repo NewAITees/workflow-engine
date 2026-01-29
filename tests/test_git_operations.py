@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "worker-agent"))
 
-from git_operations import GitOperations, GitResult  # type: ignore
+from shared.git_operations import GitOperations, GitResult
 
 
 class TestGitOperations:
