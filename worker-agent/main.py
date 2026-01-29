@@ -43,6 +43,7 @@ class WorkerAgent:
 
     # Retry settings
     MAX_RETRIES = 3
+    RETRY_MARKER_RE = re.compile(r"<!--\s*worker-retry-count:(\d+)\s*-->")
 
     def __init__(self, repo: str, config_path: str | None = None):
         self.repo = repo
@@ -208,9 +209,13 @@ Closes #{issue.number}
             return True
 
         except Exception as e:
-            logger.error(f"Failed to process issue #{issue.number}: {e}")
+            logger.exception(f"Failed to process issue #{issue.number}: {e}")
 
             # Mark as failed
+            self._comment_planner_escalation(
+                issue.number,
+                f"Implementation failed: {e}",
+            )
             self.lock.mark_failed(
                 issue.number,
                 self.STATUS_IMPLEMENTING,
@@ -244,27 +249,6 @@ Closes #{issue.number}
         """
         logger.info(f"Attempting to retry PR #{pr.number}: {pr.title}")
 
-        # Get retry count
-        retry_count = self._get_retry_count(pr.number)
-        logger.info(f"PR #{pr.number} retry count: {retry_count}/{self.MAX_RETRIES}")
-
-        if retry_count >= self.MAX_RETRIES:
-            logger.warning(f"PR #{pr.number} exceeded max retries, escalating to Planner")
-            # Extract issue number
-            issue_number = self._extract_issue_number(pr.body)
-            if issue_number:
-                self.github.comment_issue(
-                    issue_number,
-                    f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
-                    f"PR #{pr.number} could not pass review.\n\n"
-                    f"**Action needed**: Please review the specification and provide more details or clarification.\n\n"
-                    f"Review feedback:\n{self._get_latest_review_feedback(pr.number)}"
-                )
-                # Remove changes-requested label and add failed
-                self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
-                self.github.add_pr_label(pr.number, self.STATUS_FAILED)
-            return False
-
         # Try to acquire lock (changes-requested -> implementing)
         lock_result = self.lock.try_lock_pr(
             pr.number,
@@ -276,15 +260,69 @@ Closes #{issue.number}
             logger.debug(f"Could not lock PR #{pr.number}: {lock_result.error}")
             return False
 
+        issue_number: int | None = None
+        issue_lock_acquired = False
+        issue_failed = False
+
         try:
             # Get the linked issue
             issue_number = self._extract_issue_number(pr.body)
             if not issue_number:
-                raise RuntimeError("Cannot find linked issue in PR body")
+                self.github.comment_pr(
+                    pr.number,
+                    "⚠️ Auto-retry skipped: cannot find linked issue in PR body.",
+                )
+                self._reset_pr_labels(
+                    pr.number,
+                    self.STATUS_IMPLEMENTING,
+                    self.STATUS_CHANGES_REQUESTED,
+                )
+                return False
+
+            issue_lock = self.lock.try_lock_issue(
+                issue_number,
+                self.STATUS_CHANGES_REQUESTED,
+                self.STATUS_IMPLEMENTING,
+            )
+            if not issue_lock.success:
+                self._reset_pr_labels(
+                    pr.number,
+                    self.STATUS_IMPLEMENTING,
+                    self.STATUS_CHANGES_REQUESTED,
+                )
+                return False
+            issue_lock_acquired = True
 
             issue = self.github.get_issue(issue_number)
             if not issue:
                 raise RuntimeError(f"Issue #{issue_number} not found")
+
+            retry_count = self._get_retry_count(issue_number)
+            logger.info(
+                f"Issue #{issue_number} retry count: {retry_count}/{self.MAX_RETRIES}"
+            )
+
+            if retry_count >= self.MAX_RETRIES:
+                logger.warning(
+                    f"Issue #{issue_number} exceeded max retries, escalating to Planner"
+                )
+                self._comment_retry_exhausted(
+                    issue_number,
+                    pr.number,
+                    self._get_latest_review_feedback(pr.number),
+                )
+                self._reset_pr_labels(
+                    pr.number,
+                    self.STATUS_IMPLEMENTING,
+                    self.STATUS_FAILED,
+                )
+                return False
+
+            next_retry = retry_count + 1
+            self.github.comment_issue(
+                issue_number,
+                self._build_retry_comment(next_retry, pr.number),
+            )
 
             # Get review feedback
             feedback = self._get_latest_review_feedback(pr.number)
@@ -328,28 +366,46 @@ Closes #{issue.number}
                 raise RuntimeError(f"Push failed: {push_result.error}")
 
             # Record retry
-            self._record_retry(pr.number, retry_count + 1)
-
             # Update labels: implementing -> reviewing
-            self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
-            self.github.add_pr_label(pr.number, self.STATUS_REVIEWING)
+            self._reset_pr_labels(
+                pr.number,
+                self.STATUS_IMPLEMENTING,
+                self.STATUS_REVIEWING,
+            )
 
             logger.info(f"PR #{pr.number} updated, ready for re-review")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to retry PR #{pr.number}: {e}")
+            logger.exception(f"Failed to retry PR #{pr.number}: {e}")
 
-            # Reset to changes-requested
-            self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
-            self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
+            if issue_number:
+                self._comment_planner_escalation(
+                    issue_number,
+                    f"Retry implementation failed: {e}",
+                )
+                self.lock.mark_failed(
+                    issue_number,
+                    self.STATUS_IMPLEMENTING,
+                    str(e),
+                )
+                issue_failed = True
 
-            self.github.comment_pr(
-                pr.number,
-                f"⚠️ Auto-retry failed: {e}\n\nPlease review manually or update the specification.",
-            )
+            try:
+                self._reset_pr_labels(
+                    pr.number,
+                    self.STATUS_IMPLEMENTING,
+                    self.STATUS_CHANGES_REQUESTED,
+                )
+            except Exception as label_err:
+                logger.warning(
+                    f"Failed to reset labels for PR #{pr.number}: {label_err}"
+                )
 
             return False
+        finally:
+            if issue_lock_acquired and issue_number and not issue_failed:
+                self._release_issue_lock(issue_number)
 
     def _extract_issue_number(self, pr_body: str) -> int | None:
         """Extract issue number from PR body."""
@@ -366,34 +422,71 @@ Closes #{issue.number}
 
         return None
 
-    def _get_retry_count(self, pr_number: int) -> int:
-        """Get current retry count from PR comments."""
-        comments = self.github.get_issue_comments(pr_number, limit=50)
-        retry_count = 0
+    def _get_retry_count(self, issue_number: int) -> int:
+        """Get current retry count from issue comments."""
+        comments = self.github.get_issue_comments(issue_number, limit=50)
+        return self._parse_retry_count(comments)
 
+    @staticmethod
+    def _parse_retry_count(comments: list[dict]) -> int:
+        """Parse retry count from issue comments."""
+        retry_count = 0
         for comment in comments:
             body = comment.get("body", "")
-            # Look for RETRY:N marker
-            match = re.search(r"RETRY:(\d+)", body)
+            match = WorkerAgent.RETRY_MARKER_RE.search(body)
             if match:
-                count = int(match.group(1))
-                retry_count = max(retry_count, count)
-
+                retry_count = max(retry_count, int(match.group(1)))
         return retry_count
 
-    def _record_retry(self, pr_number: int, retry_count: int) -> None:
-        """Record retry attempt in PR comment."""
-        self.github.comment_pr(
-            pr_number,
-            f"🔄 **Auto-retry #{retry_count}**\n\nRETRY:{retry_count}\n\n"
-            f"Worker Agent is addressing review feedback and regenerating implementation.",
+    @staticmethod
+    def _build_retry_comment(retry_count: int, pr_number: int) -> str:
+        """Build a retry comment with a stable marker."""
+        return (
+            f"🔄 **Auto-retry #{retry_count}**\n\n"
+            f"PR #{pr_number} is being re-implemented based on review feedback.\n\n"
+            f"<!-- worker-retry-count:{retry_count} -->"
         )
+
+    def _comment_retry_exhausted(
+        self, issue_number: int, pr_number: int, feedback: str
+    ) -> None:
+        """Comment on the issue when retries are exhausted."""
+        self.github.comment_issue(
+            issue_number,
+            f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
+            f"PR #{pr_number} could not pass review.\n\n"
+            f"**Action needed**: Please review the specification and provide more details or clarification.\n\n"
+            f"Review feedback:\n{feedback}",
+        )
+
+    def _comment_planner_escalation(self, issue_number: int, reason: str) -> None:
+        """Escalate to Planner for design/spec review."""
+        self.github.comment_issue(
+            issue_number,
+            f"⚠️ **Planner escalation requested**\n\n{reason}\n\n"
+            "Please review the design/spec and clarify requirements.",
+        )
+
+    def _reset_pr_labels(self, pr_number: int, from_label: str, to_label: str) -> None:
+        """Reset PR labels during retry flow."""
+        self.github.remove_pr_label(pr_number, from_label)
+        self.github.add_pr_label(pr_number, to_label)
+
+    def _release_issue_lock(self, issue_number: int) -> None:
+        """Release issue lock by restoring changes-requested label."""
+        self.github.remove_label(issue_number, self.STATUS_IMPLEMENTING)
+        self.github.add_label(issue_number, self.STATUS_CHANGES_REQUESTED)
 
     def _get_latest_review_feedback(self, pr_number: int) -> str:
         """Get the most recent review feedback."""
         reviews = self.github.get_pr_reviews(pr_number)
 
         if not reviews:
+            comments = self.github.get_issue_comments(pr_number, limit=10)
+            for comment in reversed(comments):
+                body = comment.get("body", "").strip()
+                if body:
+                    return body
             return "No review feedback available"
 
         # Get the most recent CHANGES_REQUESTED review
@@ -406,6 +499,12 @@ Closes #{issue.number}
         # Fallback to the most recent review with a body
         for review in reversed(reviews):
             body = review.get("body", "").strip()
+            if body:
+                return body
+
+        comments = self.github.get_issue_comments(pr_number, limit=10)
+        for comment in reversed(comments):
+            body = comment.get("body", "").strip()
             if body:
                 return body
 
