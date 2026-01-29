@@ -1,248 +1,161 @@
 #!/usr/bin/env python3
-"""
-Status Dashboard - View workflow status for a repository.
-
-Displays Issues and PRs grouped by workflow status labels.
-
-Usage:
-    uv run scripts/status.py <owner/repo>
-    uv run scripts/status.py <owner/repo> --json
-"""
-
 import argparse
 import json
+import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-# Add parent directory to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import yaml
+from rich.table import Table
 
-from shared.github_client import GitHubClient, Issue, PullRequest  # noqa: E402
+# Add project root to path to import shared modules
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
 
-
-@dataclass
-class StatusSummary:
-    """Summary of workflow status."""
-
-    ready: list[Issue]
-    implementing: list[Issue]
-    reviewing: list[PullRequest]
-    in_review: list[PullRequest]
-    approved: list[PullRequest]
-    changes_requested: list[PullRequest]
-    failed: list[Issue | PullRequest]
+from shared.console import console, print_error, print_header, print_info  # noqa: E402
 
 
-class StatusDashboard:
-    """Dashboard for viewing workflow status."""
-
-    # Status labels
-    LABELS = {
-        "ready": "status:ready",
-        "implementing": "status:implementing",
-        "reviewing": "status:reviewing",
-        "in_review": "status:in-review",
-        "approved": "status:approved",
-        "changes_requested": "status:changes-requested",
-        "failed": "status:failed",
-    }
-
-    def __init__(self, repo: str, gh_cli: str = "gh"):
-        self.repo = repo
-        self.github = GitHubClient(repo, gh_cli=gh_cli)
-
-    def get_status(self) -> StatusSummary:
-        """Fetch current workflow status."""
-        return StatusSummary(
-            ready=self.github.list_issues(labels=[self.LABELS["ready"]]),
-            implementing=self.github.list_issues(labels=[self.LABELS["implementing"]]),
-            reviewing=self.github.list_prs(labels=[self.LABELS["reviewing"]]),
-            in_review=self.github.list_prs(labels=[self.LABELS["in_review"]]),
-            approved=self.github.list_prs(labels=[self.LABELS["approved"]]),
-            changes_requested=self.github.list_prs(
-                labels=[self.LABELS["changes_requested"]]
-            ),
-            failed=self.github.list_issues(labels=[self.LABELS["failed"]])
-            + self.github.list_prs(labels=[self.LABELS["failed"]]),
-        )
-
-    def print_status(self, summary: StatusSummary) -> None:
-        """Print status in human-readable format."""
-        print("=" * 60)
-        print(f"  Workflow Status Dashboard: {self.repo}")
-        print("=" * 60)
-        print()
-
-        # Issues section
-        self._print_section(
-            "Issues Ready for Implementation",
-            summary.ready,
-            "status:ready",
-            icon="📋",
-        )
-
-        self._print_section(
-            "Issues Being Implemented",
-            summary.implementing,
-            "status:implementing",
-            icon="🔨",
-        )
-
-        # PRs section
-        self._print_section(
-            "PRs Waiting for Review",
-            summary.reviewing,
-            "status:reviewing",
-            icon="👀",
-        )
-
-        self._print_section(
-            "PRs Under Review",
-            summary.in_review,
-            "status:in-review",
-            icon="🔍",
-        )
-
-        self._print_section(
-            "Approved PRs",
-            summary.approved,
-            "status:approved",
-            icon="✅",
-        )
-
-        self._print_section(
-            "PRs with Requested Changes",
-            summary.changes_requested,
-            "status:changes-requested",
-            icon="📝",
-        )
-
-        # Failed section
-        if summary.failed:
-            self._print_section(
-                "Failed Items",
-                summary.failed,
-                "status:failed",
-                icon="❌",
-            )
-
-        # Summary counts
-        print("-" * 60)
-        print("Summary:")
-        print(
-            f"  Issues:  {len(summary.ready)} ready, {len(summary.implementing)} in progress"
-        )
-        total_prs = (
-            len(summary.reviewing)
-            + len(summary.in_review)
-            + len(summary.approved)
-            + len(summary.changes_requested)
-        )
-        print(f"  PRs:     {total_prs} total ({len(summary.approved)} approved)")
-        if summary.failed:
-            print(f"  Failed:  {len(summary.failed)} items need attention")
-        print()
-
-    def _print_section(
-        self,
-        title: str,
-        items: list[Issue | PullRequest],
-        label: str,
-        icon: str = "",
-    ) -> None:
-        """Print a section of items."""
-        print(f"{icon} {title} [{label}]")
-        print("-" * 60)
-
-        if not items:
-            print("  (none)")
-        else:
-            for item in items:
-                number = item.number
-                item_title = (
-                    item.title[:50] + "..." if len(item.title) > 50 else item.title
-                )
-                item_type = "PR" if isinstance(item, PullRequest) else "Issue"
-                print(f"  #{number:4d} [{item_type}] {item_title}")
-
-        print()
-
-    def to_json(self, summary: StatusSummary) -> str:
-        """Convert status to JSON."""
-
-        def serialize_item(item: Issue | PullRequest) -> dict:
-            data = {
-                "number": item.number,
-                "title": item.title,
-                "labels": item.labels,
-                "type": "pr" if isinstance(item, PullRequest) else "issue",
-            }
-            if isinstance(item, PullRequest):
-                data["head_ref"] = item.head_ref
-                data["base_ref"] = item.base_ref
-            return data
-
-        output = {
-            "repository": self.repo,
-            "status": {
-                "ready": [serialize_item(i) for i in summary.ready],
-                "implementing": [serialize_item(i) for i in summary.implementing],
-                "reviewing": [serialize_item(i) for i in summary.reviewing],
-                "in_review": [serialize_item(i) for i in summary.in_review],
-                "approved": [serialize_item(i) for i in summary.approved],
-                "changes_requested": [
-                    serialize_item(i) for i in summary.changes_requested
-                ],
-                "failed": [serialize_item(i) for i in summary.failed],
-            },
-            "counts": {
-                "issues_ready": len(summary.ready),
-                "issues_implementing": len(summary.implementing),
-                "prs_reviewing": len(summary.reviewing),
-                "prs_in_review": len(summary.in_review),
-                "prs_approved": len(summary.approved),
-                "prs_changes_requested": len(summary.changes_requested),
-                "failed": len(summary.failed),
-            },
-        }
-        return json.dumps(output, indent=2, ensure_ascii=False)
+def load_config(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
+        print_error(f"Config file not found: {config_path}")
+        sys.exit(1)
+    with open(config_path) as f:
+        return yaml.safe_load(f)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="View workflow status for a repository"
+def run_gh_command(args: list[str]) -> Any:
+    """Run a GitHub CLI command and return JSON output."""
+    cmd = (
+        ["gh"]
+        + args
+        + ["--json", "number,title,url,state,labels,assignees,createdAt,updatedAt"]
     )
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print_error(f"GitHub CLI command failed: {' '.join(cmd)}")
+        print_error(e.stderr)
+        return []
+    except json.JSONDecodeError:
+        print_error("Failed to parse GitHub CLI output")
+        return []
+
+
+def get_status_from_labels(labels: list[dict[str, Any]]) -> str:
+    """Extract status from labels (looks for status:*)."""
+    for label in labels:
+        name = label["name"]
+        if name.startswith("status:"):
+            return name.replace("status:", "")
+    return "unknown"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Workflow Engine Status Dashboard")
     parser.add_argument(
-        "repo",
-        help="Repository in owner/repo format",
+        "repo_filter", nargs="?", help="Filter by repository name (owner/repo)"
     )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output in JSON format",
-    )
-    parser.add_argument(
-        "--gh-cli",
-        default="gh",
-        help="Path to gh CLI (default: gh)",
-    )
-
+    parser.add_argument("--json", action="store_true", help="Output raw JSON")
     args = parser.parse_args()
 
-    dashboard = StatusDashboard(args.repo, gh_cli=args.gh_cli)
+    config_path = project_root / "config" / "repos.yml"
+    config = load_config(config_path)
 
-    try:
-        summary = dashboard.get_status()
+    repositories = config.get("repositories", [])
+    if args.repo_filter:
+        repositories = [r for r in repositories if args.repo_filter in r["name"]]
 
-        if args.json:
-            print(dashboard.to_json(summary))
-        else:
-            dashboard.print_status(summary)
+    if not repositories:
+        print_info("No repositories found to check.")
+        return
 
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    dashboard_data = []
+
+    for repo in repositories:
+        repo_name = repo["name"]
+        if not args.json:
+            print_info(f"Fetching data for {repo_name}...")
+
+        # Fetch Issues
+        issues = run_gh_command(
+            ["issue", "list", "--repo", repo_name, "--limit", "50", "--state", "open"]
+        )
+        # Fetch PRs
+        prs = run_gh_command(
+            ["pr", "list", "--repo", repo_name, "--limit", "50", "--state", "open"]
+        )
+
+        repo_data = {"name": repo_name, "items": []}
+
+        for item in issues + prs:
+            item_type = "PR" if "pull_request" in item else "Issue"
+            # gh pr list output doesn't have pull_request key usually in the same way issue list might not distinguish clearly if mixed,
+            # but usually we run separate commands.
+            # actually strict distinction: 'url' contains /pull/ or /issues/
+            if "/pull/" in item["url"]:
+                item_type = "PR"
+            else:
+                item_type = "Issue"
+
+            status = get_status_from_labels(item.get("labels", []))
+
+            repo_data["items"].append(
+                {
+                    "number": item["number"],
+                    "type": item_type,
+                    "title": item["title"],
+                    "status": status,
+                    "url": item["url"],
+                    "updatedAt": item.get("updatedAt", ""),
+                }
+            )
+
+        dashboard_data.append(repo_data)
+
+    if args.json:
+        print(json.dumps(dashboard_data, indent=2, ensure_ascii=False))
+        return
+
+    # Render Table
+    print_header("Workflow Engine Status Dashboard")
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Repository", style="cyan")
+    table.add_column("ID", style="dim")
+    table.add_column("Type", width=6)
+    table.add_column("Status", style="bold")
+    table.add_column("Title")
+    table.add_column("Updated", style="dim")
+
+    has_items = False
+    for repo in dashboard_data:
+        for item in repo["items"]:
+            has_items = True
+            status_style = "white"
+            if item["status"] == "ready":
+                status_style = "green"
+            elif item["status"] == "implementing":
+                status_style = "blue"
+            elif item["status"] == "reviewing":
+                status_style = "yellow"
+            elif item["status"] == "failed":
+                status_style = "red"
+
+            table.add_row(
+                repo["name"],
+                f"#{item['number']}",
+                item["type"],
+                f"[{status_style}]{item['status']}[/]",
+                item["title"],
+                item["updatedAt"][:16].replace("T", " "),
+            )
+
+    if has_items:
+        console.print(table)
+    else:
+        print_info("No active items found.")
 
 
 if __name__ == "__main__":
