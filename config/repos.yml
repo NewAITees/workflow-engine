@@ -9,3 +9,4 @@ repositories:
     claude_cli: claude
     gh_cli: gh
     log_level: INFO
+    stale_lock_timeout_minutes: 30

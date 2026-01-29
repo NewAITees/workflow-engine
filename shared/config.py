@@ -19,6 +19,7 @@ class AgentConfig:
     claude_cli: str = "claude"
     gh_cli: str = "gh"
     log_level: str = "INFO"
+    stale_lock_timeout_minutes: int = 30
 
     def __post_init__(self) -> None:
         if self.work_dir is None:

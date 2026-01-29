@@ -203,6 +203,28 @@ class GitHubClient:
                     pass
         return comments
 
+    def get_issue_events(self, issue_number: int) -> list[dict]:
+        """Get issue/PR events (including label history)."""
+        args = [
+            "api",
+            f"/repos/{self.repo}/issues/{issue_number}/events",
+            "--paginate",
+            "--jq",
+            ".[] | {event: .event, created_at: .created_at, label: (.label.name // null)}",
+        ]
+        result = self._run(args, check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+
+        events = []
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        return events
+
     def create_issue(
         self,
         title: str,

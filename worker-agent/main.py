@@ -10,6 +10,7 @@ import logging
 import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Add parent directory to path for shared imports
@@ -65,6 +66,7 @@ class WorkerAgent:
 
         while True:
             try:
+                self._process_stale_locks()
                 self._process_ready_issues()
                 self._process_changes_requested_prs()
                 time.sleep(self.config.poll_interval)
@@ -78,6 +80,7 @@ class WorkerAgent:
 
     def run_once(self) -> bool:
         """Process one issue/PR and return. For testing."""
+        self._process_stale_locks()
         # Try ready issues first
         issues = self.github.list_issues(labels=[self.STATUS_READY])
         if issues:
@@ -90,6 +93,144 @@ class WorkerAgent:
 
         logger.info("No work to process")
         return False
+
+    def _now(self) -> datetime:
+        """Get current time (UTC)."""
+        return datetime.now(timezone.utc)
+
+    def _parse_timestamp(self, value: str) -> datetime | None:
+        """Parse GitHub ISO timestamp into datetime."""
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _get_latest_comment_time(self, issue_number: int) -> datetime | None:
+        """Get the most recent comment timestamp for an issue/PR."""
+        comments = self.github.get_issue_comments(issue_number, limit=50)
+        latest: datetime | None = None
+        for comment in comments:
+            created_at = self._parse_timestamp(comment.get("created_at", ""))
+            if created_at and (latest is None or created_at > latest):
+                latest = created_at
+        return latest
+
+    def _get_previous_status_label(
+        self,
+        issue_number: int,
+        candidates: list[str],
+    ) -> str | None:
+        """Find the last status label before implementing was set."""
+        events = self.github.get_issue_events(issue_number)
+        if not events:
+            return None
+
+        parsed_events = []
+        for event in events:
+            created_at = self._parse_timestamp(event.get("created_at", ""))
+            label = event.get("label")
+            if created_at and label:
+                parsed_events.append(
+                    {
+                        "event": event.get("event"),
+                        "label": label,
+                        "created_at": created_at,
+                    }
+                )
+
+        if not parsed_events:
+            return None
+
+        parsed_events.sort(key=lambda e: e["created_at"])
+
+        implementing_time: datetime | None = None
+        for event in reversed(parsed_events):
+            if event["event"] == "labeled" and event["label"] == self.STATUS_IMPLEMENTING:
+                implementing_time = event["created_at"]
+                break
+
+        if implementing_time is None:
+            return None
+
+        for event in reversed(parsed_events):
+            if event["created_at"] > implementing_time:
+                continue
+            if event["event"] == "labeled" and event["label"] in candidates:
+                return event["label"]
+
+        return None
+
+    def _process_stale_locks(self) -> None:
+        """Detect and recover stale implementing locks."""
+        timeout_minutes = self.config.stale_lock_timeout_minutes
+        if timeout_minutes <= 0:
+            return
+
+        cutoff = self._now() - timedelta(minutes=timeout_minutes)
+
+        issues = self.github.list_issues(labels=[self.STATUS_IMPLEMENTING])
+        for issue in issues:
+            try:
+                last_comment = self._get_latest_comment_time(issue.number)
+                if last_comment is None or last_comment >= cutoff:
+                    continue
+
+                previous_status = self._get_previous_status_label(
+                    issue.number,
+                    [self.STATUS_READY],
+                ) or self.STATUS_READY
+
+                self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                self.github.add_label(issue.number, previous_status)
+
+                locked_minutes = int((self._now() - last_comment).total_seconds() / 60)
+                logger.info(
+                    "Recovered stale issue lock #%s (locked ~%s minutes), reset to %s",
+                    issue.number,
+                    locked_minutes,
+                    previous_status,
+                )
+                self.github.comment_issue(
+                    issue.number,
+                    "🔓 **Stale lock recovered**\n\n"
+                    f"Status reset to `{previous_status}` after ~{locked_minutes} minutes "
+                    "of inactivity.",
+                )
+            except Exception as e:
+                logger.exception(f"Failed to recover stale issue lock #{issue.number}: {e}")
+
+        prs = self.github.list_prs(labels=[self.STATUS_IMPLEMENTING])
+        for pr in prs:
+            try:
+                last_comment = self._get_latest_comment_time(pr.number)
+                if last_comment is None or last_comment >= cutoff:
+                    continue
+
+                previous_status = self._get_previous_status_label(
+                    pr.number,
+                    [self.STATUS_CHANGES_REQUESTED, self.STATUS_REVIEWING],
+                ) or self.STATUS_REVIEWING
+
+                self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
+                self.github.add_pr_label(pr.number, previous_status)
+
+                locked_minutes = int((self._now() - last_comment).total_seconds() / 60)
+                logger.info(
+                    "Recovered stale PR lock #%s (locked ~%s minutes), reset to %s",
+                    pr.number,
+                    locked_minutes,
+                    previous_status,
+                )
+                self.github.comment_pr(
+                    pr.number,
+                    "🔓 **Stale lock recovered**\n\n"
+                    f"Status reset to `{previous_status}` after ~{locked_minutes} minutes "
+                    "of inactivity.",
+                )
+            except Exception as e:
+                logger.exception(f"Failed to recover stale PR lock #{pr.number}: {e}")
 
     def _process_ready_issues(self) -> None:
         """Find and process ready issues."""
