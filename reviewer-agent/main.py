@@ -129,12 +129,47 @@ class ReviewerAgent:
 
             if review_result["approved"]:
                 logger.info(f"PR #{pr.number} approved")
-                self.github.approve_pr(pr.number, review_result["comment"])
-                self.github.remove_pr_label(pr.number, self.STATUS_IN_REVIEW)
-                self.github.add_pr_label(pr.number, self.STATUS_APPROVED)
-
-                # Auto-merge if configured
-                # self.github.merge_pr(pr.number)
+                approve_ok = self.github.approve_pr(
+                    pr.number, review_result["comment"]
+                )
+                if approve_ok:
+                    self.github.remove_pr_label(pr.number, self.STATUS_IN_REVIEW)
+                    add_label_ok = self.github.add_pr_label(
+                        pr.number, self.STATUS_APPROVED
+                    )
+                    if self.config.auto_merge and add_label_ok:
+                        merge_ok = self.github.merge_pr(
+                            pr.number, method=self.config.merge_method
+                        )
+                        if merge_ok:
+                            logger.info(f"Auto-merged PR #{pr.number}")
+                        else:
+                            logger.error(f"Auto-merge failed for PR #{pr.number}")
+                            self.github.comment_pr(
+                                pr.number,
+                                "⚠️ Auto-merge failed after approval. "
+                                "Please merge manually.",
+                            )
+                    elif self.config.auto_merge and not add_label_ok:
+                        logger.error(
+                            f"Skipping auto-merge for PR #{pr.number}: "
+                            "approval or label update failed"
+                        )
+                        self.github.comment_pr(
+                            pr.number,
+                            "⚠️ Auto-merge was configured but skipped due to "
+                            "approval or label update failure. Please merge manually.",
+                        )
+                else:
+                    logger.error(
+                        f"Skipping label updates for PR #{pr.number}: approval failed"
+                    )
+                    if self.config.auto_merge:
+                        self.github.comment_pr(
+                            pr.number,
+                            "⚠️ Auto-merge was configured but skipped due to "
+                            "approval failure. Please merge manually.",
+                        )
             else:
                 logger.info(f"PR #{pr.number} needs changes")
                 self.github.request_changes_pr(pr.number, review_result["comment"])

@@ -11,6 +11,8 @@ repositories:
     claude_cli: claude      # Path to Claude Code CLI
     gh_cli: gh              # Path to GitHub CLI
     log_level: INFO         # Logging level
+    auto_merge: false       # Auto-merge on approval (default: false)
+    merge_method: squash    # "squash" (default), "merge", or "rebase"
 
   # Example with Claude backend
   # - name: myorg/myproject

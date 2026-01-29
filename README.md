@@ -104,6 +104,18 @@ uv run reviewer-agent/main.py owner/repo
 uv run reviewer-agent/main.py owner/repo --once
 ```
 
+## Reviewer Agent 自動マージ
+
+Reviewer Agent が `status:approved` を付与した直後に、自動でマージを試行します。
+リポジトリごとに opt-in で有効化できます。
+
+```yaml
+repositories:
+  - name: owner/repo
+    auto_merge: true        # デフォルト: false
+    merge_method: squash    # "squash" (デフォルト), "merge", "rebase"
+```
+
 ## ラベル体系
 
 | ラベル | 意味 |
