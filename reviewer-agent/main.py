@@ -198,17 +198,27 @@ class ReviewerAgent:
 
         output = result.output
 
-        # Parse decision - look for DECISION line at start of a line
-        # Must be exact match to avoid false positives
+        # Parse decision - look for DECISION line or ### Decision header
         approved = False
-        for line in output.split("\n"):
+        lines = output.split("\n")
+        for i, line in enumerate(lines):
             line_upper = line.strip().upper()
+
+            # Format 1: "DECISION: APPROVE"
             if line_upper.startswith("DECISION:"):
-                # Extract the decision value
                 decision_value = line_upper.replace("DECISION:", "").strip()
-                # Only approve if it's exactly "APPROVE" (not containing CHANGES_REQUESTED)
                 approved = decision_value == "APPROVE"
                 break
+
+            # Format 2: "### Decision" followed by "APPROVE" on next line
+            if "DECISION" in line_upper and i + 1 < len(lines):
+                next_line = lines[i + 1].strip().upper()
+                if next_line == "APPROVE":
+                    approved = True
+                    break
+                elif next_line == "CHANGES_REQUESTED":
+                    approved = False
+                    break
 
         # Clean up output for comment
         comment = (
