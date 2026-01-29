@@ -19,6 +19,8 @@ class AgentConfig:
     claude_cli: str = "claude"
     gh_cli: str = "gh"
     log_level: str = "INFO"
+    auto_merge: bool = False  # Auto-merge approved PRs
+    merge_method: str = "squash"  # "squash", "merge", or "rebase"
 
     def __post_init__(self) -> None:
         if self.work_dir is None:
@@ -30,6 +32,11 @@ class AgentConfig:
         if self.llm_backend not in ("codex", "claude"):
             raise ValueError(
                 f"Invalid llm_backend: {self.llm_backend}. Must be 'codex' or 'claude'"
+            )
+        # Validate merge_method
+        if self.merge_method not in ("squash", "merge", "rebase"):
+            raise ValueError(
+                f"Invalid merge_method: {self.merge_method}. Must be 'squash', 'merge', or 'rebase'"
             )
 
 

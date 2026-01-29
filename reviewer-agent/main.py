@@ -134,7 +134,16 @@ class ReviewerAgent:
                 self.github.add_pr_label(pr.number, self.STATUS_APPROVED)
 
                 # Auto-merge if configured
-                # self.github.merge_pr(pr.number)
+                if self.config.auto_merge:
+                    logger.info(f"Auto-merging PR #{pr.number} with method: {self.config.merge_method}")
+                    if self.github.merge_pr(pr.number, method=self.config.merge_method):
+                        logger.info(f"Successfully merged PR #{pr.number}")
+                    else:
+                        logger.error(f"Failed to auto-merge PR #{pr.number}")
+                        self.github.comment_pr(
+                            pr.number,
+                            "⚠️ Auto-merge failed. Please merge manually."
+                        )
             else:
                 logger.info(f"PR #{pr.number} needs changes")
                 self.github.request_changes_pr(pr.number, review_result["comment"])
