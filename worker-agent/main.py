@@ -47,6 +47,7 @@ class WorkerAgent:
     def __init__(self, repo: str, config_path: str | None = None):
         self.repo = repo
         self.config = get_agent_config(repo, config_path)
+        assert self.config.work_dir is not None
 
         # Initialize components
         self.github = GitHubClient(repo, gh_cli=self.config.gh_cli)
@@ -405,18 +406,18 @@ Closes #{issue.number}
             if review.get("state") == "CHANGES_REQUESTED":
                 body = review.get("body", "").strip()
                 if body:
-                    return body
+                    return str(body)
 
         # Fallback to the most recent review with a body
         for review in reversed(reviews):
             body = review.get("body", "").strip()
             if body:
-                return body
+                return str(body)
 
         return "No detailed review feedback available"
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Worker Agent - Autonomous implementation daemon"
     )

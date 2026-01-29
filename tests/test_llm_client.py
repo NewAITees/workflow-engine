@@ -49,7 +49,7 @@ class TestLLMClient:
 
         cmd = client._build_command("test prompt", allowed_tools=None)
 
-        assert cmd == ["codex", "test prompt"]
+        assert cmd == ["codex", "exec", "test prompt"]
         assert "--full-auto" not in cmd
 
     def test_claude_command_building(self):

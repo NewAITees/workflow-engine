@@ -173,7 +173,7 @@ class PlannerAgent:
         return first_line or "New Feature"
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Planner Agent - Interactive specification generator"
     )

@@ -238,7 +238,7 @@ class ReviewerAgent:
         return {"approved": approved, "comment": comment}
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Reviewer Agent - Autonomous code review daemon"
     )
