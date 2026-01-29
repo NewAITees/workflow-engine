@@ -52,6 +52,25 @@ cp config/repos.yml.example config/repos.yml
 # repos.yml でリポジトリとLLMバックエンドを設定
 ```
 
+## コード品質チェック（pre-commit）
+
+コミット前に `ruff` / `mypy` / 基本チェックを自動実行するため、pre-commitを導入しています。
+
+```bash
+# pre-commitフックをインストール
+uv run pre-commit install
+```
+
+- `ruff check` は `--fix` 付きで実行されます（自動修正を適用）
+- `ruff format` はフォーマッタとして実行されます
+- `mypy` は `pyproject.toml` の設定を参照します
+
+CI（GitHub Actions等）では次の実行を前提にしてください。
+
+```bash
+uv run pre-commit run --all-files
+```
+
 ## LLMバックエンド設定
 
 `config/repos.yml` で `llm_backend` を設定:
