@@ -12,13 +12,13 @@ Usage:
 import argparse
 import json
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from shared.github_client import GitHubClient, Issue, PullRequest
+from shared.github_client import GitHubClient, Issue, PullRequest  # noqa: E402
 
 
 @dataclass
@@ -130,7 +130,9 @@ class StatusDashboard:
         # Summary counts
         print("-" * 60)
         print("Summary:")
-        print(f"  Issues:  {len(summary.ready)} ready, {len(summary.implementing)} in progress")
+        print(
+            f"  Issues:  {len(summary.ready)} ready, {len(summary.implementing)} in progress"
+        )
         total_prs = (
             len(summary.reviewing)
             + len(summary.in_review)
@@ -158,7 +160,9 @@ class StatusDashboard:
         else:
             for item in items:
                 number = item.number
-                item_title = item.title[:50] + "..." if len(item.title) > 50 else item.title
+                item_title = (
+                    item.title[:50] + "..." if len(item.title) > 50 else item.title
+                )
                 item_type = "PR" if isinstance(item, PullRequest) else "Issue"
                 print(f"  #{number:4d} [{item_type}] {item_title}")
 
@@ -187,7 +191,9 @@ class StatusDashboard:
                 "reviewing": [serialize_item(i) for i in summary.reviewing],
                 "in_review": [serialize_item(i) for i in summary.in_review],
                 "approved": [serialize_item(i) for i in summary.approved],
-                "changes_requested": [serialize_item(i) for i in summary.changes_requested],
+                "changes_requested": [
+                    serialize_item(i) for i in summary.changes_requested
+                ],
                 "failed": [serialize_item(i) for i in summary.failed],
             },
             "counts": {

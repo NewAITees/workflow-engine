@@ -45,11 +45,39 @@ codex --version
 # または Claude Code CLI
 claude --version
 
-# 3. 設定ファイルをコピー
+# 3. 依存関係のインストール
+uv sync --all-extras
+
+# 4. pre-commitのセットアップ（開発者向け）
+uv run pre-commit install
+
+# 5. 設定ファイルをコピー
 cp config/repos.yml.example config/repos.yml
 
-# 4. 設定を編集
+# 6. 設定を編集
 # repos.yml でリポジトリとLLMバックエンドを設定
+```
+
+## 開発者向けコマンド
+
+```bash
+# テスト実行
+uv run pytest
+
+# カバレッジ付きテスト
+uv run pytest --cov=shared --cov=planner-agent --cov=worker-agent --cov=reviewer-agent
+
+# リント
+uv run ruff check .
+
+# フォーマット
+uv run ruff format .
+
+# 型チェック
+uv run mypy .
+
+# pre-commitを全ファイルに実行
+uv run pre-commit run --all-files
 ```
 
 ## LLMバックエンド設定

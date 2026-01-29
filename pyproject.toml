@@ -14,6 +14,7 @@ dev = [
     "pytest-asyncio>=0.21",
     "ruff>=0.1.0",
     "mypy>=1.0",
+    "pre-commit>=3.0",
 ]
 
 [tool.ruff]
@@ -35,6 +36,7 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+exclude = ["scripts/"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

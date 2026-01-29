@@ -41,7 +41,7 @@ class GitHubClient:
 
     def _run(
         self, args: list[str], check: bool = True, capture: bool = True
-    ) -> subprocess.CompletedProcess:
+    ) -> subprocess.CompletedProcess[str]:
         """Run gh CLI command."""
         cmd = [self.gh] + args
         logger.debug(f"Running: {' '.join(cmd)}")
@@ -454,17 +454,14 @@ class GitHubClient:
             return {"checks": [], "all_passed": True}
 
         # Check if all checks have passed (case-insensitive)
-        all_passed = all(
-            c.get("state", "").upper() == "SUCCESS"
-            for c in checks
-        )
+        all_passed = all(c.get("state", "").upper() == "SUCCESS" for c in checks)
 
         return {"checks": checks, "all_passed": all_passed}
 
     def is_ci_green(self, pr_number: int) -> bool:
         """Check if all CI checks have passed."""
         result = self.get_pr_checks(pr_number)
-        return result["all_passed"]
+        return bool(result["all_passed"])
 
     def get_pr_reviews(self, pr_number: int) -> list[dict]:
         """Get reviews for a pull request."""

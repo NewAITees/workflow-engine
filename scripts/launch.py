@@ -16,28 +16,26 @@ Modes:
 """
 
 import argparse
-import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
-import signal
 from pathlib import Path
-from typing import List, Optional
 
 
 class WorkflowLauncher:
     """Cross-platform launcher for workflow agents."""
 
-    def __init__(self, repo: str, config: Optional[str] = None):
+    def __init__(self, repo: str, config: str | None = None):
         self.repo = repo
         self.config = config
         self.script_dir = Path(__file__).parent
         self.engine_dir = self.script_dir.parent
         self.is_windows = platform.system() == "Windows"
-        self.processes: List[subprocess.Popen] = []
+        self.processes: list[subprocess.Popen] = []
 
-    def _build_command(self, agent: str) -> List[str]:
+    def _build_command(self, agent: str) -> list[str]:
         """Build command for an agent."""
         agent_path = self.engine_dir / f"{agent}-agent" / "main.py"
         cmd = ["uv", "run", str(agent_path), self.repo]
@@ -86,7 +84,7 @@ class WorkflowLauncher:
 
         # Run Planner in foreground
         try:
-            planner_proc = subprocess.run(
+            subprocess.run(
                 self._build_command("planner"),
                 cwd=self.engine_dir,
             )
@@ -98,7 +96,9 @@ class WorkflowLauncher:
     def launch_tmux(self) -> None:
         """Launch agents in tmux session."""
         if self.is_windows:
-            print("tmux is not available on Windows. Use 'subprocess' or 'terminal' mode.")
+            print(
+                "tmux is not available on Windows. Use 'subprocess' or 'terminal' mode."
+            )
             sys.exit(1)
 
         if not shutil.which("tmux"):
@@ -125,37 +125,83 @@ class WorkflowLauncher:
         planner_cmd = " ".join(self._build_command("planner"))
 
         # Create tmux session
-        subprocess.run([
-            "tmux", "new-session", "-d", "-s", session_name,
-            "-n", "agents", "-c", str(self.engine_dir),
-        ])
+        subprocess.run(
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-n",
+                "agents",
+                "-c",
+                str(self.engine_dir),
+            ]
+        )
 
         # Send commands to panes
-        subprocess.run([
-            "tmux", "send-keys", "-t", session_name,
-            f"echo '=== Worker Agent ===' && {worker_cmd}", "C-m",
-        ])
+        subprocess.run(
+            [
+                "tmux",
+                "send-keys",
+                "-t",
+                session_name,
+                f"echo '=== Worker Agent ===' && {worker_cmd}",
+                "C-m",
+            ]
+        )
 
-        subprocess.run([
-            "tmux", "split-window", "-h", "-t", session_name,
-            "-c", str(self.engine_dir),
-        ])
-        subprocess.run([
-            "tmux", "send-keys", "-t", session_name,
-            f"echo '=== Reviewer Agent ===' && {reviewer_cmd}", "C-m",
-        ])
+        subprocess.run(
+            [
+                "tmux",
+                "split-window",
+                "-h",
+                "-t",
+                session_name,
+                "-c",
+                str(self.engine_dir),
+            ]
+        )
+        subprocess.run(
+            [
+                "tmux",
+                "send-keys",
+                "-t",
+                session_name,
+                f"echo '=== Reviewer Agent ===' && {reviewer_cmd}",
+                "C-m",
+            ]
+        )
 
-        subprocess.run([
-            "tmux", "select-pane", "-t", f"{session_name}:0.0",
-        ])
-        subprocess.run([
-            "tmux", "split-window", "-v", "-t", session_name,
-            "-c", str(self.engine_dir),
-        ])
-        subprocess.run([
-            "tmux", "send-keys", "-t", session_name,
-            f"echo '=== Planner Agent ===' && {planner_cmd}", "C-m",
-        ])
+        subprocess.run(
+            [
+                "tmux",
+                "select-pane",
+                "-t",
+                f"{session_name}:0.0",
+            ]
+        )
+        subprocess.run(
+            [
+                "tmux",
+                "split-window",
+                "-v",
+                "-t",
+                session_name,
+                "-c",
+                str(self.engine_dir),
+            ]
+        )
+        subprocess.run(
+            [
+                "tmux",
+                "send-keys",
+                "-t",
+                session_name,
+                f"echo '=== Planner Agent ===' && {planner_cmd}",
+                "C-m",
+            ]
+        )
 
         subprocess.run(["tmux", "select-layout", "-t", session_name, "main-vertical"])
 
@@ -188,17 +234,31 @@ class WorkflowLauncher:
         # Build Windows Terminal command
         wt_cmd = [
             "wt",
-            "--title", "Worker Agent",
-            "-d", str(self.engine_dir),
-            "cmd", "/k", worker_cmd,
+            "--title",
+            "Worker Agent",
+            "-d",
+            str(self.engine_dir),
+            "cmd",
+            "/k",
+            worker_cmd,
             ";",
-            "new-tab", "--title", "Reviewer Agent",
-            "-d", str(self.engine_dir),
-            "cmd", "/k", reviewer_cmd,
+            "new-tab",
+            "--title",
+            "Reviewer Agent",
+            "-d",
+            str(self.engine_dir),
+            "cmd",
+            "/k",
+            reviewer_cmd,
             ";",
-            "new-tab", "--title", "Planner Agent",
-            "-d", str(self.engine_dir),
-            "cmd", "/k", planner_cmd,
+            "new-tab",
+            "--title",
+            "Planner Agent",
+            "-d",
+            str(self.engine_dir),
+            "cmd",
+            "/k",
+            planner_cmd,
         ]
 
         subprocess.run(wt_cmd)
@@ -244,13 +304,15 @@ def main():
         help="Repository in owner/repo format",
     )
     parser.add_argument(
-        "--mode", "-m",
+        "--mode",
+        "-m",
         choices=["auto", "subprocess", "tmux", "terminal"],
         default="auto",
         help="Launch mode (default: auto)",
     )
     parser.add_argument(
-        "--config", "-c",
+        "--config",
+        "-c",
         help="Path to config file",
     )
 

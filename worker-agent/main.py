@@ -249,7 +249,9 @@ Closes #{issue.number}
         logger.info(f"PR #{pr.number} retry count: {retry_count}/{self.MAX_RETRIES}")
 
         if retry_count >= self.MAX_RETRIES:
-            logger.warning(f"PR #{pr.number} exceeded max retries, escalating to Planner")
+            logger.warning(
+                f"PR #{pr.number} exceeded max retries, escalating to Planner"
+            )
             # Extract issue number
             issue_number = self._extract_issue_number(pr.body)
             if issue_number:
@@ -258,7 +260,7 @@ Closes #{issue.number}
                     f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
                     f"PR #{pr.number} could not pass review.\n\n"
                     f"**Action needed**: Please review the specification and provide more details or clarification.\n\n"
-                    f"Review feedback:\n{self._get_latest_review_feedback(pr.number)}"
+                    f"Review feedback:\n{self._get_latest_review_feedback(pr.number)}",
                 )
                 # Remove changes-requested label and add failed
                 self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
@@ -303,7 +305,9 @@ Closes #{issue.number}
                 raise RuntimeError(f"Failed to update branch: {branch_result.error}")
 
             # Generate improved implementation with feedback
-            logger.info(f"Regenerating implementation with feedback (retry {retry_count + 1})...")
+            logger.info(
+                f"Regenerating implementation with feedback (retry {retry_count + 1})..."
+            )
             gen_result = self.llm.generate_implementation(
                 spec=f"{issue.body}\n\n## Review Feedback (Please address these issues)\n{feedback}",
                 repo_context=f"Repository: {self.repo}\nRetry attempt: {retry_count + 1}/{self.MAX_RETRIES}",
