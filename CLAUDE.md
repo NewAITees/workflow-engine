@@ -71,7 +71,8 @@ This system uses GitHub Issues and PRs as a message queue, coordinated by labels
 
 Workflow states are encoded as labels:
 - `status:ready` → Worker picks up
-- `status:implementing` → Worker is working
+- `status:implementing` → Worker: generating tests & implementation
+- `status:testing` → Worker: running tests (TDD workflow)
 - `status:reviewing` → Reviewer picks up
 - `status:in-review` → Reviewer is working
 - `status:approved` / `status:changes-requested` → Final states
@@ -79,21 +80,117 @@ Workflow states are encoded as labels:
 
 State transitions are atomic and protected by the distributed lock mechanism.
 
+**TDD Flow (Worker):**
+```
+status:ready → status:implementing → status:testing → status:reviewing
+                     ↑                      ↓
+                     └──────(retry)─────────┘
+```
+
 ### Distributed Lock Mechanism
 
-Multi-agent coordination without a lock server, using GitHub comments + labels:
+Multi-agent coordination without a lock server, using GitHub comments + agent IDs:
 
-1. **ACK Comment**: Agent posts timestamped comment `ACK:worker:agent-id-123:1234567890`
-2. **Wait**: 2-second grace period for race condition detection
-3. **Conflict Detection**: Check if our ACK is the earliest within last 30 seconds
-4. **Label Transition**: Winner transitions label (e.g., `status:ready` → `status:implementing`)
-5. **Verification**: Confirm label was successfully applied
+1. **Pre-Check**: Check for existing active locks (within 30-minute timeout)
+2. **ACK Comment**: Agent posts timestamped comment `ACK:worker:agent-id-123:1234567890`
+3. **Wait**: 2-second grace period for race condition detection
+4. **Conflict Detection**: Check if our ACK is the earliest within last 30 seconds
+5. **Label Transition**: Winner transitions label (e.g., `status:ready` → `status:implementing`)
+6. **Verification**: Confirm label was successfully applied
 
 **Critical implementation details:**
-- Only ACKs within 30-second window are considered valid (prevents stale locks)
-- Earliest timestamp wins
+- **30-minute timeout**: Locks expire after 30 minutes, enabling crash recovery
+- **Agent ID tracking**: Each agent has unique ID (e.g., `worker-a1b2c3d4`)
+- **30-second conflict window**: Only ACKs within last 30 seconds compete
+- **Earliest timestamp wins**: Among recent ACKs, earliest gets the lock
+- **Automatic resumption**: After timeout, any agent can take over
 - If label transition fails, lock acquisition fails
 - See `shared/lock.py:LockManager` for implementation
+
+**Crash Recovery:**
+- If Worker crashes, lock expires after 30 minutes
+- Another Worker can automatically resume the work
+- Original Worker can continue if lock still active
+
+### TDD (Test-Driven Development) Workflow
+
+Worker Agent follows strict TDD principles:
+
+**1. Test Generation First**
+- LLM generates pytest tests based on specification
+- Tests are committed before implementation
+- Tests define expected behavior
+
+**2. Implementation**
+- LLM generates implementation to pass tests
+- Implementation is committed
+
+**3. Automatic Test Execution**
+- Worker runs pytest on generated tests
+- Captures stdout/stderr for feedback
+
+**4. Retry on Failure (max 3 attempts)**
+- If tests fail, Worker provides failure output to LLM
+- LLM regenerates implementation addressing test failures
+- Process repeats until tests pass or max retries reached
+
+**5. PR Creation**
+- PR is created only after all tests pass
+- PR description includes TDD metrics (attempts, test results)
+
+**Benefits:**
+- ✅ Ensures code quality through automated testing
+- ✅ Reduces review cycles by catching bugs early
+- ✅ Provides detailed feedback loop for LLM
+- ✅ Transparent progress tracking via GitHub comments
+
+**Implementation:**
+```python
+# 1. Generate tests
+test_result = llm.generate_tests(spec, repo_context, work_dir)
+
+# 2. Generate implementation (with retry)
+for attempt in range(MAX_RETRIES):
+    impl_result = llm.generate_implementation(spec, repo_context, work_dir)
+
+    # 3. Run tests
+    test_passed, output = _run_tests(issue_number)
+
+    if test_passed:
+        break  # Success!
+
+    # 4. Provide feedback for retry
+    spec += f"\n\n## Test Failure\n{output}"
+```
+
+See `worker-agent/main.py:_try_process_issue()` for full implementation.
+
+### Agent ID Management
+
+Each agent instance gets a unique identifier for tracking and coordination:
+
+**ID Generation:**
+```python
+self.agent_id = f"worker-{uuid.uuid4().hex[:8]}"
+# Example: worker-a1b2c3d4
+```
+
+**Usage:**
+- Posted in ACK comments for lock tracking
+- Included in all log messages
+- Visible in GitHub issue/PR comments
+- Enables multi-agent deployment
+
+**Benefits:**
+- Clear ownership: Know which agent is processing what
+- Debugging: Trace actions back to specific agent instance
+- Coordination: Multiple agents can run without conflicts
+- Monitoring: Track agent behavior and performance
+
+**Example ACK comment:**
+```
+ACK:worker:worker-a1b2c3d4:1706123456789
+```
 
 ### LLM Backend Abstraction
 
@@ -113,6 +210,7 @@ repositories:
 ```
 
 **Key methods:**
+- `generate_tests()`: Takes spec + repo context → generates pytest tests (TDD)
 - `generate_implementation()`: Takes spec + repo context → generates implementation
 - `review_code()`: Takes spec + diff → generates review
 - `create_spec()`: Takes user story → generates technical spec

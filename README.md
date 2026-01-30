@@ -22,8 +22,56 @@ GitHubをメッセージキューとして使用する、3エージェント構�
 ## ワークフロー
 
 1. **Planner Agent**: ユーザーストーリー → 仕様書（Issue）
-2. **Worker Agent**: `status:ready` Issue → 実装 → PR作成
+2. **Worker Agent**: `status:ready` Issue → テスト生成 → 実装 → テスト実行 → PR作成
 3. **Reviewer Agent**: `status:reviewing` PR → レビュー → Approve/Request Changes
+
+### Worker Agentの詳細フロー（TDD）
+
+```
+status:ready
+    ↓
+status:implementing（テスト生成）
+    ↓
+status:implementing（実装生成）
+    ↓
+status:testing（pytest実行）
+    ↓ (成功)      ↓ (失敗、最大3回再試行)
+status:reviewing   status:implementing（再実装）
+    ↓
+PR作成
+```
+
+## 主要機能
+
+### ✅ TDD（テスト駆動開発）徹底
+
+Worker Agentは厳格なTDDプロセスに従います：
+
+1. **テスト生成優先**: LLMが仕様からpytestテストを先に生成
+2. **実装生成**: テストをパスする実装をLLMが生成
+3. **自動テスト実行**: Workerがpytestを自動実行
+4. **失敗時の自動再試行**: テスト失敗時、失敗出力をLLMに渡して再実装（最大3回）
+5. **全テストパス後にPR作成**: テストが通るまでPRを作成しない
+
+**メリット:**
+- コード品質の自動保証
+- レビューサイクルの削減
+- バグの早期発見
+- 透明な進捗追跡（GitHub Issue/PRコメント）
+
+### 🔄 クラッシュ耐性・自動再開
+
+各エージェントには一意のIDが付与され、クラッシュからの自動復旧が可能：
+
+1. **エージェントID**: 各インスタンスに一意のID（例: `worker-a1b2c3d4`）
+2. **30分タイムアウト**: ロックは30分後に自動失効
+3. **自動再開**: 別のエージェントがタイムアウト後に自動的に作業を引き継ぎ
+4. **担当者の可視化**: ACKコメントでどのエージェントが処理中か確認可能
+
+**ユースケース:**
+- Workerクラッシュ時に別のWorkerが自動再開
+- 長時間停滞しているタスクの自動再取得
+- 複数Workerの並行稼働
 
 ## 必要要件
 
@@ -32,6 +80,7 @@ GitHubをメッセージキューとして使用する、3エージェント構�
 - [Claude Code CLI](https://claude.ai/code) (`claude` コマンド) - オプション
 - [GitHub CLI](https://cli.github.com/) (`gh` コマンド)
 - Git
+- pytest（テスト実行用）
 
 ## セットアップ
 
@@ -155,12 +204,20 @@ repositories:
 | ラベル | 意味 |
 |--------|------|
 | `status:ready` | 実装準備完了（Worker待ち） |
-| `status:implementing` | 実装中（Workerがロック中） |
+| `status:implementing` | 実装中（Workerがテスト生成・実装中） |
+| `status:testing` | テスト実行中（Workerがpytest実行中） |
 | `status:reviewing` | レビュー待ち（Reviewer待ち） |
 | `status:in-review` | レビュー中（Reviewerがロック中） |
 | `status:approved` | レビュー承認済み |
 | `status:changes-requested` | 修正要求 |
 | `status:failed` | 処理失敗 |
+
+**ラベル遷移フロー:**
+```
+ready → implementing → testing → reviewing → in-review → approved
+                ↑           ↓                              ↓
+                └───(retry)─┘                  changes-requested
+```
 
 ## ディレクトリ構成
 
@@ -184,12 +241,28 @@ workflow-engine/
 
 ## ロック機構
 
-複数エージェント間の競合を防ぐため、ACKコメント + ラベル遷移による楽観的ロックを使用。
+複数エージェント間の競合を防ぎ、クラッシュからの復旧を可能にするロック機構。
 
-1. ACKコメント投稿（タイムスタンプ付き）
-2. 2秒待機（競合検出）
-3. 最初のACKが自分か確認（30秒以内のACKのみ有効）
-4. ラベル遷移実行
+**ロック取得フロー:**
+1. **既存ロック確認**: 30分以内のACKコメントがあるかチェック
+   - あり → スキップ（他のエージェントが処理中）
+   - なし → 次へ
+2. **ACKコメント投稿**: `ACK:worker:agent-id:timestamp` 形式で投稿
+3. **2秒待機**: 競合検出のための待機
+4. **競合解決**: 30秒以内のACKのうち最古のタイムスタンプが勝者
+5. **ラベル遷移実行**: 勝者がラベルを変更
+
+**タイムアウトと復旧:**
+- **30分タイムアウト**: ACKから30分経過したロックは無効
+- **自動再開**: 別のエージェントがタイムアウト後に自動取得
+- **エージェントID追跡**: 各エージェントは一意のID（例: `worker-a1b2c3d4`）
+
+**ACKコメント例:**
+```
+ACK:worker:worker-a1b2c3d4:1706123456789
+```
+
+これにより、エージェントクラッシュ時も30分後には自動的に別のエージェントが作業を再開できます。
 
 ## トラブルシューティング
 
