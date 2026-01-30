@@ -73,6 +73,26 @@ Worker Agentは厳格なTDDプロセスに従います：
 - 長時間停滞しているタスクの自動再取得
 - 複数Workerの並行稼働
 
+### 🔧 CI失敗自動修正
+
+PR作成後、Worker AgentはCI状態を監視し、失敗時に自動で修正を試みます：
+
+1. **CI監視**: PR作成後、CI完了まで自動待機（最大10分）
+2. **失敗検出**: CIチェックが失敗したら詳細ログを取得
+3. **自動修正ループ**: LLMがログを分析→修正生成→プッシュ→CI再実行（最大3回）
+4. **失敗時の処理**: 全リトライ失敗時は`status:ci-failed`ラベルを付与して通知
+
+**メリット:**
+- CI失敗の手動対応を削減
+- 高速な反復サイクル
+- CI logsをLLMに渡して文脈を提供
+- ラベルとコメントで明確な失敗追跡
+
+**設定:**
+- `MAX_CI_RETRIES`: 自動修正試行回数（デフォルト: 3回）
+- `CI_WAIT_TIMEOUT`: CI待機タイムアウト（デフォルト: 10分）
+- `CI_CHECK_INTERVAL`: CIポーリング間隔（デフォルト: 30秒）
+
 ## 必要要件
 
 - Python 3.11+
@@ -206,17 +226,18 @@ repositories:
 | `status:ready` | 実装準備完了（Worker待ち） |
 | `status:implementing` | 実装中（Workerがテスト生成・実装中） |
 | `status:testing` | テスト実行中（Workerがpytest実行中） |
-| `status:reviewing` | レビュー待ち（Reviewer待ち） |
+| `status:reviewing` | レビュー待ち（Reviewer待ち、CI通過後） |
 | `status:in-review` | レビュー中（Reviewerがロック中） |
 | `status:approved` | レビュー承認済み |
 | `status:changes-requested` | 修正要求 |
+| `status:ci-failed` | CI失敗（自動修正3回失敗後） |
 | `status:failed` | 処理失敗 |
 
 **ラベル遷移フロー:**
 ```
-ready → implementing → testing → reviewing → in-review → approved
-                ↑           ↓                              ↓
-                └───(retry)─┘                  changes-requested
+ready → implementing → testing → CI監視 → reviewing → in-review → approved
+                ↑           ↓       ↓ (失敗)              ↓
+                └───(retry)─┘    ci-failed    changes-requested
 ```
 
 ## ディレクトリ構成

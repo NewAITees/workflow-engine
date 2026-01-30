@@ -73,9 +73,10 @@ Workflow states are encoded as labels:
 - `status:ready` → Worker picks up
 - `status:implementing` → Worker: generating tests & implementation
 - `status:testing` → Worker: running tests (TDD workflow)
-- `status:reviewing` → Reviewer picks up
+- `status:reviewing` → Reviewer picks up (after CI passes)
 - `status:in-review` → Reviewer is working
 - `status:approved` / `status:changes-requested` → Final states
+- `status:ci-failed` → CI checks failed after automatic fix attempts
 - `status:failed` → Error state
 
 State transitions are atomic and protected by the distributed lock mechanism.
@@ -164,6 +165,54 @@ for attempt in range(MAX_RETRIES):
 ```
 
 See `worker-agent/main.py:_try_process_issue()` for full implementation.
+
+### CI Auto-Fix Workflow
+
+After PR creation, Worker Agent automatically monitors CI status and attempts to fix failures:
+
+**1. CI Monitoring**
+- Worker waits for CI checks to complete (10-minute timeout)
+- Polls GitHub CI status every 30 seconds
+- Checks for success/failure/pending states
+
+**2. Automatic Fix Loop (max 3 attempts)**
+- If CI fails, Worker retrieves detailed failure logs
+- LLM analyzes logs and generates fixes
+- Fix is committed and pushed to PR branch
+- Worker waits for CI to run again
+
+**3. Failure Handling**
+- If all retries fail, PR is marked with `status:ci-failed`
+- Comments explain the failure and request manual intervention
+- If CI times out (pending), PR proceeds to review with warning comment
+
+**Benefits:**
+- ✅ Reduces manual intervention for common CI failures
+- ✅ Faster iteration cycles with automatic fixes
+- ✅ Detailed CI logs provided to LLM for context
+- ✅ Clear failure tracking via labels and comments
+
+**Configuration:**
+```python
+MAX_CI_RETRIES = 3  # Number of automatic fix attempts
+CI_WAIT_TIMEOUT = 600  # 10 minutes max wait for CI
+CI_CHECK_INTERVAL = 30  # Poll CI every 30 seconds
+```
+
+**Flow:**
+```
+PR created → Wait for CI
+                 ↓
+            CI passed? → Yes → status:reviewing
+                 ↓ No
+            Get CI logs → Fix code → Push → Wait for CI
+                 ↑                             ↓
+                 └──────(retry max 3)──────────┘
+                             ↓ Max retries
+                        status:ci-failed
+```
+
+See `worker-agent/main.py:_wait_for_ci()` and `_get_ci_failure_logs()` for implementation.
 
 ### Agent ID Management
 
