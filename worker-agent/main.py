@@ -313,12 +313,144 @@ Closes #{issue.number}
 
             logger.info(f"[{self.agent_id}] Pull request created: {pr_url}")
 
-            # Comment on issue
+            # Extract PR number from URL
+            pr_number = int(pr_url.split("/")[-1])
+
+            # Wait for CI and handle failures with retry loop
+            logger.info(f"[{self.agent_id}] Waiting for CI to complete...")
+            ci_passed, ci_status = self._wait_for_ci(
+                pr_number, timeout=self.CI_WAIT_TIMEOUT
+            )
+
+            ci_retry_count = 0
+            while (
+                not ci_passed
+                and ci_status == "failure"
+                and ci_retry_count < self.MAX_CI_RETRIES
+            ):
+                ci_retry_count += 1
+                logger.warning(
+                    f"[{self.agent_id}] CI failed (attempt {ci_retry_count}/{self.MAX_CI_RETRIES})"
+                )
+
+                # Get CI failure logs
+                ci_logs = self._get_ci_failure_logs(pr_number)
+
+                # Comment about CI failure
+                self.github.comment_pr(
+                    pr_number,
+                    f"⚠️ **CI failed (attempt {ci_retry_count}/{self.MAX_CI_RETRIES})**\n\n"
+                    f"Analyzing failures and attempting automatic fix...\n\n"
+                    f"<details>\n<summary>CI failure details</summary>\n\n"
+                    f"{ci_logs[:2000]}\n\n</details>",
+                )
+
+                # Ask LLM to fix CI failures
+                fix_spec = f"""{issue.body}
+
+## CI Failure (Attempt {ci_retry_count})
+The implementation passed local tests but CI checks failed.
+Please analyze and fix the CI failures.
+
+{ci_logs}
+"""
+
+                logger.info(
+                    f"[{self.agent_id}] Asking LLM to fix CI failures (attempt {ci_retry_count})..."
+                )
+                fix_result = self.llm.generate_implementation(
+                    spec=fix_spec,
+                    repo_context=f"Repository: {self.repo}\nCI fix attempt: {ci_retry_count}/{self.MAX_CI_RETRIES}",
+                    work_dir=self.git.path,
+                )
+
+                if not fix_result.success:
+                    logger.error(
+                        f"[{self.agent_id}] CI fix generation failed: {fix_result.error}"
+                    )
+                    break
+
+                # Commit CI fix
+                fix_commit_msg = f"fix: address CI failures for #{issue.number} (attempt {ci_retry_count})\n\n{ci_logs[:200]}"
+                fix_commit_result = self.git.commit(fix_commit_msg)
+
+                if not fix_commit_result.success:
+                    logger.error(
+                        f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
+                    )
+                    break
+
+                # Push fix
+                push_result = self.git.push(branch_name)
+                if not push_result.success:
+                    logger.error(
+                        f"[{self.agent_id}] CI fix push failed: {push_result.error}"
+                    )
+                    break
+
+                # Wait for CI again
+                logger.info(f"[{self.agent_id}] Waiting for CI after fix...")
+                ci_passed, ci_status = self._wait_for_ci(
+                    pr_number, timeout=self.CI_WAIT_TIMEOUT
+                )
+
+            # Check final CI status
+            if not ci_passed:
+                if ci_status == "pending":
+                    # CI still pending after timeout
+                    logger.warning(
+                        f"[{self.agent_id}] CI still pending after timeout, marking for manual review"
+                    )
+                    self.github.comment_pr(
+                        pr_number,
+                        "⏱️ **CI checks are taking longer than expected**\n\n"
+                        "The PR is ready for manual review while CI completes.",
+                    )
+                elif ci_status == "failure":
+                    # CI failed after all retries
+                    logger.error(
+                        f"[{self.agent_id}] CI failed after {ci_retry_count} fix attempts"
+                    )
+
+                    # Mark PR with ci-failed status
+                    self.github.add_pr_label(pr_number, self.STATUS_CI_FAILED)
+                    self.github.remove_pr_label(pr_number, self.STATUS_REVIEWING)
+
+                    self.github.comment_pr(
+                        pr_number,
+                        f"❌ **CI checks failed after {ci_retry_count} automatic fix attempts**\n\n"
+                        f"Manual intervention required. Please review the CI logs and fix the issues.\n\n"
+                        f"The PR has been marked with `{self.STATUS_CI_FAILED}` label.",
+                    )
+
+                    # Also comment on issue
+                    self.github.comment_issue(
+                        issue.number,
+                        f"⚠️ **CI checks failed**\n\n"
+                        f"Pull Request: {pr_url}\n\n"
+                        f"Attempted {ci_retry_count} automatic fixes but CI still failing.\n"
+                        f"Manual review needed.",
+                    )
+
+                    return False
+            else:
+                logger.info(f"[{self.agent_id}] CI passed!")
+                if ci_retry_count > 0:
+                    self.github.comment_pr(
+                        pr_number,
+                        f"✅ **CI now passing after {ci_retry_count} automatic fix(es)!**",
+                    )
+
+            # Comment on issue about successful completion
+            ci_info = ""
+            if ci_retry_count > 0:
+                ci_info = f"\n- CI fixes: {ci_retry_count} automatic fix(es) applied"
+
             self.github.comment_issue(
                 issue.number,
                 f"✅ **Implementation complete with TDD!**\n\n"
                 f"- Tests generated and passed\n"
-                f"- Attempts: {test_retry_count + 1}/{self.MAX_RETRIES}\n\n"
+                f"- Test attempts: {test_retry_count + 1}/{self.MAX_RETRIES}{ci_info}\n\n"
                 f"Pull Request: {pr_url}",
             )
 
@@ -531,12 +663,135 @@ Closes #{issue.number}
                 f"[{self.agent_id}] PR #{pr.number} updated with TDD, ready for re-review"
             )
 
-            # Comment on PR
+            # Wait for CI and handle failures with retry loop
+            logger.info(f"[{self.agent_id}] Waiting for CI to complete...")
+            ci_passed, ci_status = self._wait_for_ci(
+                pr.number, timeout=self.CI_WAIT_TIMEOUT
+            )
+
+            ci_retry_count = 0
+            while (
+                not ci_passed
+                and ci_status == "failure"
+                and ci_retry_count < self.MAX_CI_RETRIES
+            ):
+                ci_retry_count += 1
+                logger.warning(
+                    f"[{self.agent_id}] CI failed (attempt {ci_retry_count}/{self.MAX_CI_RETRIES})"
+                )
+
+                # Get CI failure logs
+                ci_logs = self._get_ci_failure_logs(pr.number)
+
+                # Comment about CI failure
+                self.github.comment_pr(
+                    pr.number,
+                    f"⚠️ **CI failed (attempt {ci_retry_count}/{self.MAX_CI_RETRIES})**\n\n"
+                    f"Analyzing failures and attempting automatic fix...\n\n"
+                    f"<details>\n<summary>CI failure details</summary>\n\n"
+                    f"{ci_logs[:2000]}\n\n</details>",
+                )
+
+                # Ask LLM to fix CI failures
+                fix_spec = f"""{issue.body}
+
+## Review Feedback
+{feedback}
+
+## CI Failure (Attempt {ci_retry_count})
+The implementation passed local tests but CI checks failed.
+Please analyze and fix the CI failures.
+
+{ci_logs}
+"""
+
+                logger.info(
+                    f"[{self.agent_id}] Asking LLM to fix CI failures (attempt {ci_retry_count})..."
+                )
+                fix_result = self.llm.generate_implementation(
+                    spec=fix_spec,
+                    repo_context=f"Repository: {self.repo}\nCI fix attempt: {ci_retry_count}/{self.MAX_CI_RETRIES}",
+                    work_dir=self.git.path,
+                )
+
+                if not fix_result.success:
+                    logger.error(
+                        f"[{self.agent_id}] CI fix generation failed: {fix_result.error}"
+                    )
+                    break
+
+                # Commit CI fix
+                fix_commit_msg = f"fix: address CI failures for PR #{pr.number} (attempt {ci_retry_count})\n\n{ci_logs[:200]}"
+                fix_commit_result = self.git.commit(fix_commit_msg)
+
+                if not fix_commit_result.success:
+                    logger.error(
+                        f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
+                    )
+                    break
+
+                # Push fix (force push to update PR)
+                push_result = self.git.push(branch_name, force=True)
+                if not push_result.success:
+                    logger.error(
+                        f"[{self.agent_id}] CI fix push failed: {push_result.error}"
+                    )
+                    break
+
+                # Wait for CI again
+                logger.info(f"[{self.agent_id}] Waiting for CI after fix...")
+                ci_passed, ci_status = self._wait_for_ci(
+                    pr.number, timeout=self.CI_WAIT_TIMEOUT
+                )
+
+            # Check final CI status
+            if not ci_passed:
+                if ci_status == "pending":
+                    # CI still pending after timeout
+                    logger.warning(
+                        f"[{self.agent_id}] CI still pending after timeout, marking for manual review"
+                    )
+                    self.github.comment_pr(
+                        pr.number,
+                        "⏱️ **CI checks are taking longer than expected**\n\n"
+                        "The PR is ready for manual review while CI completes.",
+                    )
+                elif ci_status == "failure":
+                    # CI failed after all retries
+                    logger.error(
+                        f"[{self.agent_id}] CI failed after {ci_retry_count} fix attempts"
+                    )
+
+                    # Mark PR with ci-failed status
+                    self.github.add_pr_label(pr.number, self.STATUS_CI_FAILED)
+                    self.github.remove_pr_label(pr.number, self.STATUS_REVIEWING)
+
+                    self.github.comment_pr(
+                        pr.number,
+                        f"❌ **CI checks failed after {ci_retry_count} automatic fix attempts**\n\n"
+                        f"Manual intervention required. Please review the CI logs and fix the issues.\n\n"
+                        f"The PR has been marked with `{self.STATUS_CI_FAILED}` label.",
+                    )
+
+                    return False
+            else:
+                logger.info(f"[{self.agent_id}] CI passed!")
+                if ci_retry_count > 0:
+                    self.github.comment_pr(
+                        pr.number,
+                        f"✅ **CI now passing after {ci_retry_count} automatic fix(es)!**",
+                    )
+
+            # Comment on PR with final status
+            ci_info = ""
+            if ci_retry_count > 0:
+                ci_info = f"\n- CI fixes: {ci_retry_count} automatic fix(es) applied"
+
             self.github.comment_pr(
                 pr.number,
                 f"✅ **Implementation updated with TDD!**\n\n"
                 f"- Addressed review feedback\n"
-                f"- All tests passed (attempts: {test_retry_count + 1}/{self.MAX_RETRIES})\n"
+                f"- All tests passed (attempts: {test_retry_count + 1}/{self.MAX_RETRIES}){ci_info}\n"
                 f"- Ready for re-review\n\n"
                 f"Review retry: {retry_count + 1}/{self.MAX_RETRIES}",
             )
