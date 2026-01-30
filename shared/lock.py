@@ -9,6 +9,9 @@ from .github_client import GitHubClient
 
 logger = logging.getLogger(__name__)
 
+# Lock timeout: 30 minutes (in milliseconds)
+LOCK_TIMEOUT = 30 * 60 * 1000
+
 
 @dataclass
 class LockResult:
@@ -56,6 +59,34 @@ class LockManager:
             # Malformed timestamp
             return None
 
+    def get_active_lock(self, issue_number: int) -> str | None:
+        """
+        Get the agent_id of the active lock holder (within LOCK_TIMEOUT).
+
+        Returns:
+            agent_id if there's an active lock, None otherwise
+        """
+        current_time = int(time.time() * 1000)
+        min_valid_timestamp = current_time - LOCK_TIMEOUT
+
+        comments = self.github.get_issue_comments(issue_number, limit=20)
+
+        for comment in comments:
+            parsed = self._parse_ack_message(comment.get("body", ""))
+            if parsed and parsed["agent_type"] == self.agent_type:
+                # Check if lock is still valid (within timeout)
+                if parsed["timestamp"] >= min_valid_timestamp:
+                    agent_id = str(parsed["agent_id"])
+                    logger.debug(
+                        f"Found active lock on issue #{issue_number}: "
+                        f"agent={agent_id}, "
+                        f"age={(current_time - parsed['timestamp']) / 1000:.1f}s"
+                    )
+                    return agent_id
+
+        logger.debug(f"No active lock found on issue #{issue_number}")
+        return None
+
     def try_lock_issue(
         self,
         issue_number: int,
@@ -66,6 +97,7 @@ class LockManager:
         Try to acquire a lock on an issue.
 
         Uses ACK comment + label transition for distributed locking.
+        Checks for existing active locks (within LOCK_TIMEOUT) before attempting.
 
         Args:
             issue_number: The issue to lock
@@ -75,6 +107,24 @@ class LockManager:
         Returns:
             LockResult indicating success or failure
         """
+        # Check for existing active lock
+        active_lock_holder = self.get_active_lock(issue_number)
+        if active_lock_holder:
+            if active_lock_holder == self.agent_id:
+                # We already hold the lock, can proceed
+                logger.debug(
+                    f"Already holding lock on issue #{issue_number}, proceeding"
+                )
+            else:
+                # Another agent holds the lock
+                logger.info(
+                    f"Issue #{issue_number} is locked by {active_lock_holder}, skipping"
+                )
+                return LockResult(
+                    success=False,
+                    error=f"Locked by {active_lock_holder} (within timeout)",
+                )
+
         timestamp = int(time.time() * 1000)
         ack_msg = self._create_ack_message(timestamp)
         # Define time window for valid ACKs (only ACKs within last 30 seconds count)
@@ -154,7 +204,22 @@ class LockManager:
         Try to acquire a lock on a pull request.
 
         Similar to issue locking but for PRs.
+        Checks for existing active locks (within LOCK_TIMEOUT) before attempting.
         """
+        # Check for existing active lock
+        active_lock_holder = self.get_active_lock(pr_number)
+        if active_lock_holder:
+            if active_lock_holder == self.agent_id:
+                logger.debug(f"Already holding lock on PR #{pr_number}, proceeding")
+            else:
+                logger.info(
+                    f"PR #{pr_number} is locked by {active_lock_holder}, skipping"
+                )
+                return LockResult(
+                    success=False,
+                    error=f"Locked by {active_lock_holder} (within timeout)",
+                )
+
         timestamp = int(time.time() * 1000)
         ack_msg = self._create_ack_message(timestamp)
         min_valid_timestamp = timestamp - 30000

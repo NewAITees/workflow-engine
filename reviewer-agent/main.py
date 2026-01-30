@@ -48,7 +48,9 @@ class ReviewerAgent:
 
         # Initialize components
         self.github = GitHubClient(repo, gh_cli=self.config.gh_cli)
-        self.lock = LockManager(self.github, agent_type="reviewer")
+        self.lock = LockManager(
+            self.github, agent_type="reviewer", agent_id=self.agent_id
+        )
         self.llm = LLMClient(self.config)
 
         logger.info(f"Reviewer Agent initialized for {repo}")

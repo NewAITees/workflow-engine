@@ -56,7 +56,9 @@ class WorkerAgent:
 
         # Initialize components
         self.github = GitHubClient(repo, gh_cli=self.config.gh_cli)
-        self.lock = LockManager(self.github, agent_type="worker")
+        self.lock = LockManager(
+            self.github, agent_type="worker", agent_id=self.agent_id
+        )
         self.llm = LLMClient(self.config)
         self.git = GitOperations(repo, Path(self.config.work_dir))
 

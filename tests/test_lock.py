@@ -54,14 +54,15 @@ class TestLockManager:
         assert result is None
 
     def test_lock_filters_old_acks(self):
-        """Test that old ACKs outside time window are ignored."""
+        """Test that old ACKs outside LOCK_TIMEOUT window are ignored."""
         current_time = int(time.time() * 1000)
-        old_time = current_time - 60000  # 60 seconds ago (outside 30s window)
+        # 31 minutes ago (outside 30-minute LOCK_TIMEOUT)
+        old_time = current_time - (31 * 60 * 1000)
 
         # Mock comment posting success
         self.github.comment_issue.return_value = True
 
-        # Return an old ACK that should be filtered out
+        # Return an old ACK that should be filtered out (beyond LOCK_TIMEOUT)
         self.github.get_issue_comments.return_value = [
             {"body": f"ACK:worker:old-agent:{old_time}"},
         ]
@@ -78,7 +79,7 @@ class TestLockManager:
                 )
 
         # Should fail because our ACK isn't in the comments (only old one)
-        # The old ACK is filtered, so no valid ACKs found
+        # The old ACK is filtered (beyond LOCK_TIMEOUT), so no valid ACKs found
         assert result.success is False
         assert "ACK comment not found" in result.error
 
@@ -102,7 +103,7 @@ class TestLockManager:
                 )
 
         assert result.success is False
-        assert "Lost lock to other-agent" in result.error
+        assert "other-agent" in result.error
 
     def test_lock_success_when_first(self):
         """Test successful lock when we're the first ACK."""
@@ -148,4 +149,85 @@ class TestLockManager:
                 )
 
         # Should succeed because reviewer ACK doesn't compete with worker
+        assert result.success is True
+
+    def test_get_active_lock_within_timeout(self):
+        """Test that active lock within LOCK_TIMEOUT is detected."""
+        current_time = int(time.time() * 1000)
+        recent_time = current_time - (10 * 60 * 1000)  # 10 minutes ago
+
+        self.github.get_issue_comments.return_value = [
+            {"body": f"ACK:worker:other-agent:{recent_time}"},
+        ]
+
+        with patch("time.time", return_value=current_time / 1000):
+            active_lock = self.lock.get_active_lock(1)
+
+        assert active_lock == "other-agent"
+
+    def test_get_active_lock_beyond_timeout(self):
+        """Test that lock beyond LOCK_TIMEOUT is not detected."""
+        current_time = int(time.time() * 1000)
+        old_time = current_time - (31 * 60 * 1000)  # 31 minutes ago
+
+        self.github.get_issue_comments.return_value = [
+            {"body": f"ACK:worker:old-agent:{old_time}"},
+        ]
+
+        with patch("time.time", return_value=current_time / 1000):
+            active_lock = self.lock.get_active_lock(1)
+
+        assert active_lock is None
+
+    def test_get_active_lock_no_acks(self):
+        """Test that no active lock is found when no ACKs exist."""
+        self.github.get_issue_comments.return_value = []
+
+        active_lock = self.lock.get_active_lock(1)
+
+        assert active_lock is None
+
+    def test_lock_respects_existing_timeout_lock(self):
+        """Test that try_lock_issue respects existing active locks."""
+        current_time = int(time.time() * 1000)
+        recent_time = current_time - (5 * 60 * 1000)  # 5 minutes ago
+
+        # Return an existing active lock from another agent
+        self.github.get_issue_comments.return_value = [
+            {"body": f"ACK:worker:other-agent:{recent_time}"},
+        ]
+
+        with patch("time.sleep"):
+            with patch("time.time", return_value=current_time / 1000):
+                result = self.lock.try_lock_issue(
+                    1, "status:ready", "status:implementing"
+                )
+
+        assert result.success is False
+        assert "Locked by other-agent" in result.error
+
+    def test_lock_can_reacquire_after_timeout(self):
+        """Test that lock can be acquired after LOCK_TIMEOUT expires."""
+        current_time = int(time.time() * 1000)
+        expired_time = current_time - (31 * 60 * 1000)  # 31 minutes ago
+
+        # First call to get_active_lock: return expired lock
+        # Second call within try_lock_issue: return our new ACK
+        self.github.get_issue_comments.side_effect = [
+            [{"body": f"ACK:worker:old-agent:{expired_time}"}],
+            [{"body": f"ACK:worker:test-agent-123:{current_time}"}],
+        ]
+
+        self.github.comment_issue.return_value = True
+        self.github.remove_label.return_value = True
+        self.github.add_label.return_value = True
+        self.github.get_issue.return_value = MagicMock(labels=["status:implementing"])
+
+        with patch("time.sleep"):
+            with patch("time.time", return_value=current_time / 1000):
+                result = self.lock.try_lock_issue(
+                    1, "status:ready", "status:implementing"
+                )
+
+        # Should succeed because old lock expired
         assert result.success is True
