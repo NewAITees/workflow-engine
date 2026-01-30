@@ -130,21 +130,233 @@ class TestGitHubClient:
 
         assert self.client.is_ci_green(1) is False
 
+    @patch("subprocess.run")
+    def test_get_default_branch_fallback(self, mock_run):
+        """Test default branch fallback when API call fails."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
 
-class TestLockManager:
-    """Tests for lock manager."""
+        branch = self.client.get_default_branch()
+
+        assert branch == "main"
 
     @patch("subprocess.run")
-    def test_lock_acquisition(self, mock_run):
-        """Test basic lock acquisition flow."""
-        from shared.lock import LockManager
+    def test_get_issue_success(self, mock_run):
+        """Test retrieving a single issue."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 5,
+                    "title": "Issue title",
+                    "body": "Details",
+                    "labels": [{"name": "status:ready"}],
+                    "state": "open",
+                }
+            ),
+        )
 
-        client = GitHubClient("owner/repo")
-        lock = LockManager(client, "worker", "test-agent")
+        issue = self.client.get_issue(5)
 
-        # Mock successful comment and label operations
-        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        assert issue is not None
+        assert issue.number == 5
+        assert "status:ready" in issue.labels
 
-        # This is a simplified test - full test would need more mocking
-        assert lock.agent_type == "worker"
-        assert lock.agent_id == "test-agent"
+    @patch("subprocess.run")
+    def test_get_issue_not_found(self, mock_run):
+        """Test get_issue returns None when not found."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Not found")
+
+        assert self.client.get_issue(99) is None
+
+    @patch("subprocess.run")
+    def test_remove_label(self, mock_run):
+        """Test removing a label success and failure."""
+        mock_run.return_value = MagicMock(returncode=0)
+        assert self.client.remove_label(1, "status:ready") is True
+
+        mock_run.return_value = MagicMock(returncode=1)
+        assert self.client.remove_label(1, "status:ready") is False
+
+    @patch("subprocess.run")
+    def test_comment_issue(self, mock_run):
+        """Test commenting on an issue."""
+        mock_run.return_value = MagicMock(returncode=0)
+        assert self.client.comment_issue(1, "message") is True
+
+        mock_run.return_value = MagicMock(returncode=1)
+        assert self.client.comment_issue(1, "message") is False
+
+    @patch("subprocess.run")
+    def test_get_issue_comments_parses_valid_json(self, mock_run):
+        """Test parsing multiple comments with mixed validity."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"id":1,"body":"ACK"}\ninvalid\n{"id":2,"body":"ACK"}\n',
+        )
+
+        comments = self.client.get_issue_comments(1, limit=5)
+
+        assert len(comments) == 2
+        assert comments[0]["id"] == 1
+
+    @patch("subprocess.run")
+    def test_create_issue_parses_number(self, mock_run):
+        """Test create_issue returns issue number from URL."""
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="https://github.com/owner/repo/issues/7\n"
+        )
+
+        assert self.client.create_issue("title", "body") == 7
+
+    @patch("subprocess.run")
+    def test_create_issue_malformed_url(self, mock_run):
+        """Test create_issue handles unexpected output."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="not-a-url")
+
+        assert self.client.create_issue("title", "body") is None
+
+    @patch("subprocess.run")
+    def test_list_prs_with_labels(self, mock_run):
+        """Test listing PRs and parsing labels."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 3,
+                        "title": "Add feature",
+                        "body": "",
+                        "labels": [{"name": "status:reviewing"}],
+                        "headRefName": "feature",
+                        "baseRefName": "main",
+                        "state": "open",
+                    }
+                ]
+            ),
+        )
+
+        prs = self.client.list_prs(labels=["status:reviewing"])
+
+        assert prs and prs[0].head_ref == "feature"
+        assert "status:reviewing" in prs[0].labels
+
+    @patch("subprocess.run")
+    def test_get_pr_not_found(self, mock_run):
+        """Test get_pr returns None when gh fails."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+
+        assert self.client.get_pr(99) is None
+
+    @patch("subprocess.run")
+    def test_get_pr_checks_no_ci(self, mock_run):
+        """Test get_pr_checks returns all_passed when no checks exist."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+
+        result = self.client.get_pr_checks(1)
+
+        assert result["all_passed"] is True
+
+    @patch("subprocess.run")
+    def test_get_pr_reviews_filters_invalid_json(self, mock_run):
+        """Test get_pr_reviews ignores malformed lines."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"id":1,"state":"APPROVED"}\ninvalid\n{"id":2,"state":"CHANGES_REQUESTED"}\n',
+        )
+
+        reviews = self.client.get_pr_reviews(1)
+
+        assert len(reviews) == 2
+
+    @patch("subprocess.run")
+    def test_get_ci_status_success(self, mock_run):
+        """Test get_ci_status when all checks passed."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"name":"test","status":"completed","conclusion":"success"}\n'
+            '{"name":"lint","status":"completed","conclusion":"success"}\n',
+        )
+
+        status = self.client.get_ci_status(1)
+
+        assert status["status"] == "success"
+        assert status["conclusion"] == "success"
+        assert status["failed_count"] == 0
+        assert status["pending_count"] == 0
+        assert len(status["checks"]) == 2
+
+    @patch("subprocess.run")
+    def test_get_ci_status_failure(self, mock_run):
+        """Test get_ci_status when some checks failed."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"name":"test","status":"completed","conclusion":"failure"}\n'
+            '{"name":"lint","status":"completed","conclusion":"success"}\n',
+        )
+
+        status = self.client.get_ci_status(1)
+
+        assert status["status"] == "failure"
+        assert status["conclusion"] == "failure"
+        assert status["failed_count"] == 1
+        assert status["pending_count"] == 0
+
+    @patch("subprocess.run")
+    def test_get_ci_status_pending(self, mock_run):
+        """Test get_ci_status when checks are pending."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"name":"test","status":"in_progress","conclusion":null}\n'
+            '{"name":"lint","status":"completed","conclusion":"success"}\n',
+        )
+
+        status = self.client.get_ci_status(1)
+
+        assert status["status"] == "pending"
+        assert status["conclusion"] == "pending"
+        assert status["pending_count"] == 1
+
+    @patch("subprocess.run")
+    def test_get_ci_status_no_checks(self, mock_run):
+        """Test get_ci_status when no CI configured."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+
+        status = self.client.get_ci_status(1)
+
+        assert status["status"] == "none"
+        assert status["conclusion"] == "none"
+        assert status["failed_count"] == 0
+
+    @patch("subprocess.run")
+    def test_get_ci_logs_with_failures(self, mock_run):
+        """Test get_ci_logs returns failed check details."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"name":"test","conclusion":"failure","html_url":"https://example.com",'
+            '"output":{"title":"Test failed","summary":"Error details"}}\n',
+        )
+
+        logs = self.client.get_ci_logs(1)
+
+        assert len(logs) == 1
+        assert logs[0]["name"] == "test"
+        assert logs[0]["conclusion"] == "failure"
+        assert logs[0]["output"]["title"] == "Test failed"
+
+    @patch("subprocess.run")
+    def test_get_ci_logs_no_failures(self, mock_run):
+        """Test get_ci_logs returns empty when no failures."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+
+        logs = self.client.get_ci_logs(1)
+
+        assert logs == []
+
+    @patch("subprocess.run")
+    def test_get_ci_logs_invalid_json(self, mock_run):
+        """Test get_ci_logs handles invalid JSON gracefully."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="invalid json\n")
+
+        logs = self.client.get_ci_logs(1)
+
+        assert logs == []

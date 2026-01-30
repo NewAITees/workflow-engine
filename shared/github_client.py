@@ -463,6 +463,144 @@ class GitHubClient:
         result = self.get_pr_checks(pr_number)
         return bool(result["all_passed"])
 
+    def get_ci_status(self, pr_number: int) -> dict:
+        """
+        Get detailed CI check status for PR.
+
+        Returns:
+            {
+                'status': 'pending' | 'success' | 'failure' | 'none',
+                'conclusion': overall conclusion,
+                'checks': [list of check results with details],
+                'pending_count': number of pending checks,
+                'failed_count': number of failed checks
+            }
+        """
+        # Use GitHub API to get check runs with more details
+        args = [
+            "api",
+            f"/repos/{self.repo}/commits/pulls/{pr_number}/check-runs",
+            "--jq",
+            ".check_runs[] | {name: .name, status: .status, conclusion: .conclusion, "
+            "started_at: .started_at, completed_at: .completed_at, html_url: .html_url}",
+        ]
+
+        result = self._run(args, check=False)
+
+        if result.returncode != 0 or not result.stdout.strip():
+            # Fallback to simple checks
+            basic_result = self.get_pr_checks(pr_number)
+            if not basic_result["checks"]:
+                return {
+                    "status": "none",
+                    "conclusion": "none",
+                    "checks": [],
+                    "pending_count": 0,
+                    "failed_count": 0,
+                }
+
+            all_passed = basic_result["all_passed"]
+            return {
+                "status": "success" if all_passed else "failure",
+                "conclusion": "success" if all_passed else "failure",
+                "checks": basic_result["checks"],
+                "pending_count": 0,
+                "failed_count": 0 if all_passed else len(basic_result["checks"]),
+            }
+
+        # Parse detailed check runs
+        checks = []
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                try:
+                    checks.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+
+        if not checks:
+            return {
+                "status": "none",
+                "conclusion": "none",
+                "checks": [],
+                "pending_count": 0,
+                "failed_count": 0,
+            }
+
+        # Analyze check status
+        pending_count = sum(1 for c in checks if c.get("status") == "in_progress")
+        failed_count = sum(
+            1
+            for c in checks
+            if c.get("conclusion") in ["failure", "timed_out", "action_required"]
+        )
+        completed_count = sum(1 for c in checks if c.get("status") == "completed")
+
+        # Determine overall status
+        if pending_count > 0:
+            status = "pending"
+            conclusion = "pending"
+        elif failed_count > 0:
+            status = "failure"
+            conclusion = "failure"
+        elif completed_count == len(checks):
+            status = "success"
+            conclusion = "success"
+        else:
+            status = "pending"
+            conclusion = "pending"
+
+        return {
+            "status": status,
+            "conclusion": conclusion,
+            "checks": checks,
+            "pending_count": pending_count,
+            "failed_count": failed_count,
+        }
+
+    def get_ci_logs(self, pr_number: int) -> list[dict]:
+        """
+        Get CI failure logs for failed checks.
+
+        Returns:
+            List of failed checks with their logs:
+            [
+                {
+                    'name': check name,
+                    'conclusion': failure reason,
+                    'html_url': link to logs,
+                    'output': {
+                        'title': error title,
+                        'summary': error summary
+                    }
+                }
+            ]
+        """
+        # Get detailed check runs with output
+        args = [
+            "api",
+            f"/repos/{self.repo}/commits/pulls/{pr_number}/check-runs",
+            "--jq",
+            '.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out") '
+            "| {name: .name, conclusion: .conclusion, html_url: .html_url, "
+            "output: {title: .output.title, summary: .output.summary}}",
+        ]
+
+        result = self._run(args, check=False)
+
+        if result.returncode != 0 or not result.stdout.strip():
+            logger.warning(f"Could not fetch CI logs for PR #{pr_number}")
+            return []
+
+        failed_checks = []
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                try:
+                    failed_checks.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+
+        return failed_checks
+
     def get_pr_reviews(self, pr_number: int) -> list[dict]:
         """Get reviews for a pull request."""
         args = [
