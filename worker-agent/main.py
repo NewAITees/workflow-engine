@@ -116,11 +116,19 @@ class WorkerAgent:
 
     def _try_process_issue(self, issue: Issue) -> bool:
         """
-        Try to process a single issue.
+        Try to process a single issue with TDD flow.
+
+        TDD Flow:
+        1. Generate tests first
+        2. Generate implementation
+        3. Run tests
+        4. Retry on failure (max 3 times)
 
         Returns True if processed successfully, False otherwise.
         """
-        logger.info(f"Attempting to process issue #{issue.number}: {issue.title}")
+        logger.info(
+            f"[{self.agent_id}] Attempting to process issue #{issue.number}: {issue.title}"
+        )
 
         # Try to acquire lock
         lock_result = self.lock.try_lock_issue(
@@ -135,54 +143,145 @@ class WorkerAgent:
 
         try:
             # Clone/update repository
-            logger.info("Preparing workspace...")
+            logger.info(f"[{self.agent_id}] Preparing workspace...")
             clone_result = self.git.clone_or_pull()
             if not clone_result.success:
                 raise RuntimeError(f"Failed to prepare workspace: {clone_result.error}")
 
             # Create feature branch
             branch_name = f"auto/issue-{issue.number}"
-            logger.info(f"Creating branch: {branch_name}")
+            logger.info(f"[{self.agent_id}] Creating branch: {branch_name}")
 
             branch_result = self.git.create_branch(branch_name)
             if not branch_result.success:
                 raise RuntimeError(f"Failed to create branch: {branch_result.error}")
 
-            # Generate implementation
-            logger.info(f"Generating implementation with {self.config.llm_backend}...")
-            gen_result = self.llm.generate_implementation(
+            # TDD Step 1: Generate tests first
+            logger.info(
+                f"[{self.agent_id}] Generating tests with {self.config.llm_backend}..."
+            )
+            test_result = self.llm.generate_tests(
                 spec=issue.body,
                 repo_context=f"Repository: {self.repo}",
                 work_dir=self.git.path,
             )
 
-            if not gen_result.success:
-                raise RuntimeError(f"Implementation failed: {gen_result.error}")
+            if not test_result.success:
+                raise RuntimeError(f"Test generation failed: {test_result.error}")
 
-            # Commit changes
-            logger.info("Committing changes...")
-            commit_msg = f"feat: implement #{issue.number}\n\n{issue.title}"
-            commit_result = self.git.commit(commit_msg)
+            # Commit tests
+            logger.info(f"[{self.agent_id}] Committing tests...")
+            test_commit_msg = f"test: add tests for #{issue.number}\n\n{issue.title}"
+            test_commit_result = self.git.commit(test_commit_msg)
 
-            if not commit_result.success:
-                raise RuntimeError(f"Commit failed: {commit_result.error}")
+            if not test_commit_result.success:
+                raise RuntimeError(f"Test commit failed: {test_commit_result.error}")
+
+            # TDD Step 2-4: Implementation with test retry loop
+            test_retry_count = 0
+            test_failure_output = ""
+            test_passed = False
+
+            while test_retry_count < self.MAX_RETRIES:
+                logger.info(
+                    f"[{self.agent_id}] Generating implementation "
+                    f"(attempt {test_retry_count + 1}/{self.MAX_RETRIES})..."
+                )
+
+                # Prepare spec with test feedback if retrying
+                impl_spec = issue.body
+                if test_retry_count > 0:
+                    impl_spec += (
+                        f"\n\n## Previous Test Failure (Attempt {test_retry_count})\n"
+                        f"Please fix the implementation to pass the tests.\n\n"
+                        f"```\n{test_failure_output[:2000]}\n```"
+                    )
+
+                # Generate implementation
+                gen_result = self.llm.generate_implementation(
+                    spec=impl_spec,
+                    repo_context=f"Repository: {self.repo}\nTDD attempt: {test_retry_count + 1}/{self.MAX_RETRIES}",
+                    work_dir=self.git.path,
+                )
+
+                if not gen_result.success:
+                    raise RuntimeError(f"Implementation failed: {gen_result.error}")
+
+                # Commit implementation
+                logger.info(f"[{self.agent_id}] Committing implementation...")
+                impl_commit_msg = f"feat: implement #{issue.number} (attempt {test_retry_count + 1})\n\n{issue.title}"
+                impl_commit_result = self.git.commit(impl_commit_msg)
+
+                if not impl_commit_result.success:
+                    raise RuntimeError(
+                        f"Implementation commit failed: {impl_commit_result.error}"
+                    )
+
+                # Transition to testing status
+                self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                self.github.add_label(issue.number, self.STATUS_TESTING)
+
+                # Run tests
+                logger.info(f"[{self.agent_id}] Running tests...")
+                test_passed, test_output = self._run_tests(issue.number)
+
+                if test_passed:
+                    logger.info(
+                        f"[{self.agent_id}] Tests passed on attempt {test_retry_count + 1}"
+                    )
+                    break
+
+                # Tests failed - record and retry
+                test_retry_count += 1
+                test_failure_output = test_output
+
+                logger.warning(
+                    f"[{self.agent_id}] Tests failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
+                )
+
+                # Comment on issue about test failure
+                self.github.comment_issue(
+                    issue.number,
+                    f"⚠️ **Test failed (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
+                    f"Retrying implementation with test feedback...\n\n"
+                    f"<details>\n<summary>Test output</summary>\n\n"
+                    f"```\n{test_output[:2000]}\n```\n\n</details>",
+                )
+
+                if test_retry_count >= self.MAX_RETRIES:
+                    # Max retries exceeded
+                    raise RuntimeError(
+                        f"Tests failed after {self.MAX_RETRIES} attempts:\n{test_output[:500]}"
+                    )
+
+                # Transition back to implementing for retry
+                self.github.remove_label(issue.number, self.STATUS_TESTING)
+                self.github.add_label(issue.number, self.STATUS_IMPLEMENTING)
+
+            # Tests passed! Transition to reviewing
+            self.github.remove_label(issue.number, self.STATUS_TESTING)
 
             # Push branch
-            logger.info("Pushing to remote...")
+            logger.info(f"[{self.agent_id}] Pushing to remote...")
             push_result = self.git.push(branch_name)
             if not push_result.success:
                 raise RuntimeError(f"Push failed: {push_result.error}")
 
             # Create pull request
-            logger.info("Creating pull request...")
+            logger.info(f"[{self.agent_id}] Creating pull request...")
             pr_body = f"""## Summary
-Auto-generated implementation for #{issue.number}
+Auto-generated implementation for #{issue.number} using TDD approach.
 
 ## Original Issue
 {issue.title}
 
 ## Implementation
-Generated by Worker Agent using {self.config.llm_backend}.
+Generated by Worker Agent ({self.agent_id}) using {self.config.llm_backend}.
+
+**TDD Process:**
+- ✅ Tests generated first
+- ✅ Implementation created
+- ✅ All tests passed (attempts: {test_retry_count + 1}/{self.MAX_RETRIES})
 
 Closes #{issue.number}
 
@@ -204,18 +303,23 @@ Closes #{issue.number}
             if not pr_url:
                 raise RuntimeError("Failed to create pull request")
 
-            logger.info(f"Pull request created: {pr_url}")
+            logger.info(f"[{self.agent_id}] Pull request created: {pr_url}")
 
             # Comment on issue
             self.github.comment_issue(
                 issue.number,
-                f"✅ Implementation complete!\n\nPull Request: {pr_url}",
+                f"✅ **Implementation complete with TDD!**\n\n"
+                f"- Tests generated and passed\n"
+                f"- Attempts: {test_retry_count + 1}/{self.MAX_RETRIES}\n\n"
+                f"Pull Request: {pr_url}",
             )
 
             return True
 
         except Exception as e:
-            logger.error(f"Failed to process issue #{issue.number}: {e}")
+            logger.error(
+                f"[{self.agent_id}] Failed to process issue #{issue.number}: {e}"
+            )
 
             # Mark as failed
             self.lock.mark_failed(
@@ -245,19 +349,23 @@ Closes #{issue.number}
 
     def _try_retry_pr(self, pr: PullRequest) -> bool:
         """
-        Try to retry a PR with changes requested.
+        Try to retry a PR with changes requested using TDD flow.
 
         Returns True if retried successfully, False otherwise.
         """
-        logger.info(f"Attempting to retry PR #{pr.number}: {pr.title}")
+        logger.info(
+            f"[{self.agent_id}] Attempting to retry PR #{pr.number}: {pr.title}"
+        )
 
         # Get retry count
         retry_count = self._get_retry_count(pr.number)
-        logger.info(f"PR #{pr.number} retry count: {retry_count}/{self.MAX_RETRIES}")
+        logger.info(
+            f"[{self.agent_id}] PR #{pr.number} retry count: {retry_count}/{self.MAX_RETRIES}"
+        )
 
         if retry_count >= self.MAX_RETRIES:
             logger.warning(
-                f"PR #{pr.number} exceeded max retries, escalating to Planner"
+                f"[{self.agent_id}] PR #{pr.number} exceeded max retries, escalating to Planner"
             )
             # Extract issue number
             issue_number = self._extract_issue_number(pr.body)
@@ -299,41 +407,108 @@ Closes #{issue.number}
             feedback = self._get_latest_review_feedback(pr.number)
 
             # Prepare workspace
-            logger.info("Preparing workspace...")
+            logger.info(f"[{self.agent_id}] Preparing workspace...")
             clone_result = self.git.clone_or_pull()
             if not clone_result.success:
                 raise RuntimeError(f"Failed to prepare workspace: {clone_result.error}")
 
             # Update the branch
             branch_name = pr.head_ref
-            logger.info(f"Updating branch: {branch_name}")
+            logger.info(f"[{self.agent_id}] Updating branch: {branch_name}")
             branch_result = self.git.create_branch(branch_name)
             if not branch_result.success:
                 raise RuntimeError(f"Failed to update branch: {branch_result.error}")
 
-            # Generate improved implementation with feedback
-            logger.info(
-                f"Regenerating implementation with feedback (retry {retry_count + 1})..."
-            )
-            gen_result = self.llm.generate_implementation(
-                spec=f"{issue.body}\n\n## Review Feedback (Please address these issues)\n{feedback}",
-                repo_context=f"Repository: {self.repo}\nRetry attempt: {retry_count + 1}/{self.MAX_RETRIES}",
-                work_dir=self.git.path,
-            )
+            # TDD retry loop with test execution
+            test_retry_count = 0
+            test_failure_output = ""
+            test_passed = False
 
-            if not gen_result.success:
-                raise RuntimeError(f"Implementation failed: {gen_result.error}")
+            while test_retry_count < self.MAX_RETRIES:
+                logger.info(
+                    f"[{self.agent_id}] Regenerating implementation with feedback "
+                    f"(test attempt {test_retry_count + 1}/{self.MAX_RETRIES})..."
+                )
 
-            # Commit changes
-            logger.info("Committing changes...")
-            commit_msg = f"fix: address review feedback for #{issue.number} (retry {retry_count + 1})\n\n{feedback[:500]}"
-            commit_result = self.git.commit(commit_msg)
+                # Prepare spec with review feedback and test feedback
+                impl_spec = f"{issue.body}\n\n## Review Feedback (Please address these issues)\n{feedback}"
 
-            if not commit_result.success:
-                raise RuntimeError(f"Commit failed: {commit_result.error}")
+                if test_retry_count > 0:
+                    impl_spec += (
+                        f"\n\n## Test Failure (Attempt {test_retry_count})\n"
+                        f"Please fix the implementation to pass the tests.\n\n"
+                        f"```\n{test_failure_output[:2000]}\n```"
+                    )
+
+                # Generate improved implementation
+                gen_result = self.llm.generate_implementation(
+                    spec=impl_spec,
+                    repo_context=f"Repository: {self.repo}\n"
+                    f"Review retry: {retry_count + 1}/{self.MAX_RETRIES}\n"
+                    f"Test attempt: {test_retry_count + 1}/{self.MAX_RETRIES}",
+                    work_dir=self.git.path,
+                )
+
+                if not gen_result.success:
+                    raise RuntimeError(f"Implementation failed: {gen_result.error}")
+
+                # Commit changes
+                logger.info(f"[{self.agent_id}] Committing changes...")
+                commit_msg = (
+                    f"fix: address review feedback for #{issue.number} "
+                    f"(retry {retry_count + 1}, test attempt {test_retry_count + 1})\n\n"
+                    f"{feedback[:500]}"
+                )
+                commit_result = self.git.commit(commit_msg)
+
+                if not commit_result.success:
+                    raise RuntimeError(f"Commit failed: {commit_result.error}")
+
+                # Transition to testing status
+                self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
+                self.github.add_pr_label(pr.number, self.STATUS_TESTING)
+
+                # Run tests
+                logger.info(f"[{self.agent_id}] Running tests...")
+                test_passed, test_output = self._run_tests(issue_number)
+
+                if test_passed:
+                    logger.info(
+                        f"[{self.agent_id}] Tests passed on attempt {test_retry_count + 1}"
+                    )
+                    break
+
+                # Tests failed - record and retry
+                test_retry_count += 1
+                test_failure_output = test_output
+
+                logger.warning(
+                    f"[{self.agent_id}] Tests failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
+                )
+
+                # Comment on PR about test failure
+                self.github.comment_pr(
+                    pr.number,
+                    f"⚠️ **Test failed during retry (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
+                    f"Retrying implementation with test feedback...\n\n"
+                    f"<details>\n<summary>Test output</summary>\n\n"
+                    f"```\n{test_output[:2000]}\n```\n\n</details>",
+                )
+
+                if test_retry_count >= self.MAX_RETRIES:
+                    raise RuntimeError(
+                        f"Tests failed after {self.MAX_RETRIES} attempts:\n{test_output[:500]}"
+                    )
+
+                # Transition back to implementing for retry
+                self.github.remove_pr_label(pr.number, self.STATUS_TESTING)
+                self.github.add_pr_label(pr.number, self.STATUS_IMPLEMENTING)
+
+            # Tests passed! Remove testing label
+            self.github.remove_pr_label(pr.number, self.STATUS_TESTING)
 
             # Force push to update PR
-            logger.info("Force pushing to update PR...")
+            logger.info(f"[{self.agent_id}] Force pushing to update PR...")
             push_result = self.git.push(branch_name, force=True)
             if not push_result.success:
                 raise RuntimeError(f"Push failed: {push_result.error}")
@@ -341,18 +516,31 @@ Closes #{issue.number}
             # Record retry
             self._record_retry(pr.number, retry_count + 1)
 
-            # Update labels: implementing -> reviewing
-            self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
+            # Add reviewing label
             self.github.add_pr_label(pr.number, self.STATUS_REVIEWING)
 
-            logger.info(f"PR #{pr.number} updated, ready for re-review")
+            logger.info(
+                f"[{self.agent_id}] PR #{pr.number} updated with TDD, ready for re-review"
+            )
+
+            # Comment on PR
+            self.github.comment_pr(
+                pr.number,
+                f"✅ **Implementation updated with TDD!**\n\n"
+                f"- Addressed review feedback\n"
+                f"- All tests passed (attempts: {test_retry_count + 1}/{self.MAX_RETRIES})\n"
+                f"- Ready for re-review\n\n"
+                f"Review retry: {retry_count + 1}/{self.MAX_RETRIES}",
+            )
+
             return True
 
         except Exception as e:
-            logger.error(f"Failed to retry PR #{pr.number}: {e}")
+            logger.error(f"[{self.agent_id}] Failed to retry PR #{pr.number}: {e}")
 
             # Reset to changes-requested
             self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
+            self.github.remove_pr_label(pr.number, self.STATUS_TESTING)
             self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
 
             self.github.comment_pr(
