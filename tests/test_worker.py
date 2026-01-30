@@ -387,3 +387,355 @@ class TestWorkerAgent:
         logs = agent._get_ci_failure_logs(123)
 
         assert "no detailed logs available" in logs
+
+    @patch("time.sleep")
+    @patch("subprocess.run")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_ci_fix_loop_success_first_try(
+        self,
+        mock_config,
+        mock_github,
+        mock_lock,
+        mock_llm,
+        mock_git,
+        mock_run,
+        mock_sleep,
+    ):
+        """Test CI fix loop when fix succeeds on first try."""
+        from shared.github_client import Issue
+        from shared.llm_client import LLMResult
+
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git_instance = mock_git.return_value
+        mock_git_instance.workspace = "/tmp/test/workspace"
+        mock_git_instance.path = Path("/tmp/test/repo")
+        mock_git_instance.clone_or_pull.return_value = MagicMock(
+            success=True, output=""
+        )
+        mock_git_instance.create_branch.return_value = MagicMock(
+            success=True, output=""
+        )
+        mock_git_instance.commit.return_value = MagicMock(success=True, output="")
+        mock_git_instance.push.return_value = MagicMock(success=True, output="")
+
+        mock_llm_instance = mock_llm.return_value
+        mock_llm_instance.generate_tests.return_value = LLMResult(
+            success=True, output="tests generated"
+        )
+        mock_llm_instance.generate_implementation.return_value = LLMResult(
+            success=True, output="implementation"
+        )
+
+        mock_lock_instance = mock_lock.return_value
+        mock_lock_instance.try_lock_issue.return_value = MagicMock(success=True)
+
+        # Mock test run success
+        mock_run.return_value = MagicMock(returncode=0, stdout="test passed", stderr="")
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = mock_git_instance
+        agent.llm = mock_llm_instance
+        agent.lock = mock_lock_instance
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=123,
+                title="Test issue",
+                body="Test spec",
+                labels=["status:ready"],
+            )
+        )
+        agent.github.get_default_branch = MagicMock(return_value="main")
+        agent.github.create_pr = MagicMock(
+            return_value="https://github.com/owner/repo/pull/42"
+        )
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.comment_pr = MagicMock(return_value=True)
+        agent.github.add_pr_label = MagicMock(return_value=True)
+        agent.github.remove_pr_label = MagicMock(return_value=True)
+        agent.github.get_ci_logs = MagicMock(return_value=[])
+
+        # Mock CI: first check fails, after fix succeeds
+        agent.github.get_ci_status = MagicMock(
+            side_effect=[
+                # First check: failure
+                {
+                    "status": "failure",
+                    "conclusion": "failure",
+                    "checks": [],
+                    "pending_count": 0,
+                    "failed_count": 1,
+                },
+                # After fix: success
+                {
+                    "status": "success",
+                    "conclusion": "success",
+                    "checks": [],
+                    "pending_count": 0,
+                    "failed_count": 0,
+                },
+            ]
+        )
+        # Override get_ci_logs with specific return value
+        agent.github.get_ci_logs = MagicMock(
+            return_value=[
+                {
+                    "name": "test",
+                    "conclusion": "failure",
+                    "html_url": "https://example.com/test",
+                    "output": {"title": "Test failed", "summary": "Error"},
+                }
+            ]
+        )
+
+        with patch.object(Path, "exists", return_value=True):
+            result = agent._try_process_issue(
+                Issue(
+                    number=123,
+                    title="Test issue",
+                    body="Test spec",
+                    labels=["status:ready"],
+                )
+            )
+
+        assert result is True
+        # Should have called get_ci_status twice (initial + after fix)
+        assert agent.github.get_ci_status.call_count == 2
+        # Should have called get_ci_logs once
+        assert agent.github.get_ci_logs.call_count == 1
+        # Should have commented about CI fix
+        assert any("CI" in str(call) for call in agent.github.comment_pr.call_args_list)
+
+    @patch("time.sleep")
+    @patch("subprocess.run")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_ci_fix_loop_failure_max_retries(
+        self,
+        mock_config,
+        mock_github,
+        mock_lock,
+        mock_llm,
+        mock_git,
+        mock_run,
+        mock_sleep,
+    ):
+        """Test CI fix loop when all retry attempts fail."""
+        from shared.github_client import Issue
+        from shared.llm_client import LLMResult
+
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git_instance = mock_git.return_value
+        mock_git_instance.workspace = "/tmp/test/workspace"
+        mock_git_instance.path = Path("/tmp/test/repo")
+        mock_git_instance.clone_or_pull.return_value = MagicMock(
+            success=True, output=""
+        )
+        mock_git_instance.create_branch.return_value = MagicMock(
+            success=True, output=""
+        )
+        mock_git_instance.commit.return_value = MagicMock(success=True, output="")
+        mock_git_instance.push.return_value = MagicMock(success=True, output="")
+
+        mock_llm_instance = mock_llm.return_value
+        mock_llm_instance.generate_tests.return_value = LLMResult(
+            success=True, output="tests generated"
+        )
+        mock_llm_instance.generate_implementation.return_value = LLMResult(
+            success=True, output="implementation"
+        )
+
+        mock_lock_instance = mock_lock.return_value
+        mock_lock_instance.try_lock_issue.return_value = MagicMock(success=True)
+
+        # Mock test run success
+        mock_run.return_value = MagicMock(returncode=0, stdout="test passed", stderr="")
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = mock_git_instance
+        agent.llm = mock_llm_instance
+        agent.lock = mock_lock_instance
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=123,
+                title="Test issue",
+                body="Test spec",
+                labels=["status:ready"],
+            )
+        )
+        agent.github.get_default_branch = MagicMock(return_value="main")
+        agent.github.create_pr = MagicMock(
+            return_value="https://github.com/owner/repo/pull/42"
+        )
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.comment_pr = MagicMock(return_value=True)
+        agent.github.add_pr_label = MagicMock(return_value=True)
+        agent.github.remove_pr_label = MagicMock(return_value=True)
+        agent.github.get_ci_logs = MagicMock(return_value=[])
+
+        # Mock CI: always fails
+        agent.github.get_ci_status = MagicMock(
+            return_value={
+                "status": "failure",
+                "conclusion": "failure",
+                "checks": [],
+                "pending_count": 0,
+                "failed_count": 1,
+            }
+        )
+        # Override get_ci_logs with specific return value
+        agent.github.get_ci_logs = MagicMock(
+            return_value=[
+                {
+                    "name": "test",
+                    "conclusion": "failure",
+                    "html_url": "https://example.com/test",
+                    "output": {"title": "Test failed", "summary": "Error"},
+                }
+            ]
+        )
+
+        with patch.object(Path, "exists", return_value=True):
+            result = agent._try_process_issue(
+                Issue(
+                    number=123,
+                    title="Test issue",
+                    body="Test spec",
+                    labels=["status:ready"],
+                )
+            )
+
+        assert result is False
+        # Should have tried CI fix 3 times (MAX_CI_RETRIES)
+        assert agent.github.get_ci_status.call_count == 1 + 3  # initial + 3 retries
+        # Should have added ci-failed label
+        assert any(
+            "ci-failed" in str(call)
+            for call in agent.github.add_pr_label.call_args_list
+        )
+
+    @patch("time.sleep")
+    @patch("subprocess.run")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_ci_passes_immediately_no_fix_needed(
+        self,
+        mock_config,
+        mock_github,
+        mock_lock,
+        mock_llm,
+        mock_git,
+        mock_run,
+        mock_sleep,
+    ):
+        """Test when CI passes immediately, no fix loop triggered."""
+        from shared.github_client import Issue
+        from shared.llm_client import LLMResult
+
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git_instance = mock_git.return_value
+        mock_git_instance.workspace = "/tmp/test/workspace"
+        mock_git_instance.path = Path("/tmp/test/repo")
+        mock_git_instance.clone_or_pull.return_value = MagicMock(
+            success=True, output=""
+        )
+        mock_git_instance.create_branch.return_value = MagicMock(
+            success=True, output=""
+        )
+        mock_git_instance.commit.return_value = MagicMock(success=True, output="")
+        mock_git_instance.push.return_value = MagicMock(success=True, output="")
+
+        mock_llm_instance = mock_llm.return_value
+        mock_llm_instance.generate_tests.return_value = LLMResult(
+            success=True, output="tests generated"
+        )
+        mock_llm_instance.generate_implementation.return_value = LLMResult(
+            success=True, output="implementation"
+        )
+
+        mock_lock_instance = mock_lock.return_value
+        mock_lock_instance.try_lock_issue.return_value = MagicMock(success=True)
+
+        # Mock test run success
+        mock_run.return_value = MagicMock(returncode=0, stdout="test passed", stderr="")
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = mock_git_instance
+        agent.llm = mock_llm_instance
+        agent.lock = mock_lock_instance
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=123,
+                title="Test issue",
+                body="Test spec",
+                labels=["status:ready"],
+            )
+        )
+        agent.github.get_default_branch = MagicMock(return_value="main")
+        agent.github.create_pr = MagicMock(
+            return_value="https://github.com/owner/repo/pull/42"
+        )
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.comment_pr = MagicMock(return_value=True)
+        agent.github.add_pr_label = MagicMock(return_value=True)
+        agent.github.remove_pr_label = MagicMock(return_value=True)
+        agent.github.get_ci_logs = MagicMock(return_value=[])
+
+        # Mock CI: passes immediately
+        agent.github.get_ci_status = MagicMock(
+            return_value={
+                "status": "success",
+                "conclusion": "success",
+                "checks": [],
+                "pending_count": 0,
+                "failed_count": 0,
+            }
+        )
+
+        with patch.object(Path, "exists", return_value=True):
+            result = agent._try_process_issue(
+                Issue(
+                    number=123,
+                    title="Test issue",
+                    body="Test spec",
+                    labels=["status:ready"],
+                )
+            )
+
+        assert result is True
+        # Should have called get_ci_status only once (initial check)
+        assert agent.github.get_ci_status.call_count == 1
+        # Should NOT have called get_ci_logs
+        assert agent.github.get_ci_logs.call_count == 0
+        # Should NOT have added ci-failed label
+        assert not any(
+            "ci-failed" in str(call)
+            for call in agent.github.add_pr_label.call_args_list
+        )
