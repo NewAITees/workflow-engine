@@ -64,3 +64,27 @@ class TestWorkspaceManager:
         # Verify remove was called on exit
         mock_main_git.worktree_remove.assert_called()
         mock_main_git.worktree_prune.assert_called()
+
+    @patch("shared.workspace.GitOperations")
+    def test_worktree_context_manager_retries_on_failure(self, mock_git_cls):
+        """Test retry logic when worktree add fails initially."""
+        mock_main_git = MagicMock()
+        mock_main_git.clone_or_pull.return_value = GitResult(success=True, output="")
+        mock_main_git.worktree_remove.return_value = GitResult(success=True, output="")
+        mock_main_git.worktree_prune.return_value = GitResult(success=True, output="")
+        mock_main_git.worktree_add.side_effect = [
+            GitResult(success=False, output="", error="exists"),
+            GitResult(success=True, output="ok"),
+        ]
+
+        mock_worktree_git = MagicMock()
+        mock_git_cls.side_effect = [mock_main_git, mock_worktree_git]
+
+        manager = WorkspaceManager(self.repo, self.main_work_dir)
+
+        with patch.object(Path, "exists", return_value=True):
+            with manager.worktree("fp", "agent-retry") as wt:
+                assert wt == mock_worktree_git
+
+        assert mock_main_git.worktree_add.call_count == 2
+        assert mock_main_git.worktree_prune.call_count == 2
