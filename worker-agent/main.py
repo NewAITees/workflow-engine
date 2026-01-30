@@ -43,6 +43,7 @@ class WorkerAgent:
     STATUS_CHANGES_REQUESTED = "status:changes-requested"
     STATUS_FAILED = "status:failed"
     STATUS_CI_FAILED = "status:ci-failed"
+    STATUS_NEEDS_CLARIFICATION = "status:needs-clarification"
 
     # Retry settings
     MAX_RETRIES = 3
@@ -51,6 +52,18 @@ class WorkerAgent:
     # CI settings
     CI_WAIT_TIMEOUT = 600  # 10 minutes
     CI_CHECK_INTERVAL = 30  # 30 seconds
+
+    MIN_SPEC_LENGTH = 100
+    SPEC_UNCLEAR_KEYWORDS = [
+        "ambiguous",
+        "unclear",
+        "not specified",
+        "undefined behavior",
+        "missing requirement",
+        "conflicting requirement",
+        "cannot determine",
+        "insufficient information",
+    ]
 
     def __init__(self, repo: str, config_path: str | None = None):
         self.repo = repo
@@ -137,6 +150,8 @@ class WorkerAgent:
         logger.info(
             f"[{self.agent_id}] Attempting to process issue #{issue.number}: {issue.title}"
         )
+
+        test_retry_count = 0
 
         # Try to acquire lock
         lock_result = self.lock.try_lock_issue(
@@ -461,17 +476,105 @@ Please analyze and fix the CI failures.
                 f"[{self.agent_id}] Failed to process issue #{issue.number}: {e}"
             )
 
-            # Mark as failed
-            self.lock.mark_failed(
-                issue.number,
-                self.STATUS_IMPLEMENTING,
-                str(e),
-            )
+            failure_reason = str(e)
+            if self._is_specification_unclear(failure_reason, issue.body):
+                self.lock.mark_needs_clarification(
+                    issue.number,
+                    self.STATUS_IMPLEMENTING,
+                    failure_reason,
+                )
+
+                feedback = self._generate_planner_feedback(
+                    issue_number=issue.number,
+                    spec=issue.body,
+                    failure_reason=failure_reason,
+                    attempt_count=test_retry_count + 1,
+                )
+
+                self.github.comment_issue(
+                    issue.number,
+                    f"⚠️ **Implementation failed - Specification clarification needed**\n\n"
+                    f"{feedback}\n\n"
+                    f"@Planner: Please review and clarify the specification.",
+                )
+
+                self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                self.github.add_label(issue.number, self.STATUS_NEEDS_CLARIFICATION)
+            else:
+                # Mark as failed
+                self.lock.mark_failed(
+                    issue.number,
+                    self.STATUS_IMPLEMENTING,
+                    failure_reason,
+                )
 
             # Cleanup branch if it was created
             self.git.cleanup_branch(f"auto/issue-{issue.number}")
 
             return False
+
+    def _is_specification_unclear(self, failure_reason: str, spec: str) -> bool:
+        """Determine if a failure indicates an unclear specification."""
+        failure_lower = failure_reason.lower()
+
+        if any(keyword in failure_lower for keyword in self.SPEC_UNCLEAR_KEYWORDS):
+            return True
+
+        if len(spec.strip()) < self.MIN_SPEC_LENGTH:
+            return True
+
+        if "test failed after" in failure_lower and "different" in failure_lower:
+            return True
+
+        return False
+
+    def _generate_planner_feedback(
+        self,
+        issue_number: int,
+        spec: str,
+        failure_reason: str,
+        attempt_count: int,
+    ) -> str:
+        """Generate detailed feedback for the Planner."""
+        feedback = f"""## Implementation Failure Analysis
+
+**Issue Number:** #{issue_number}
+**Attempts Made:** {attempt_count}/{self.MAX_RETRIES}
+**Agent ID:** {self.agent_id}
+
+### Failure Reason
+```
+{failure_reason[:1000]}
+```
+
+### Original Specification
+```
+{spec[:1000]}
+```
+
+### Clarification Needed
+
+Based on the failure analysis, the specification may need improvement in these areas:
+
+1. **Acceptance Criteria**: Are the success conditions clearly defined?
+2. **Edge Cases**: Are boundary conditions and error cases specified?
+3. **Dependencies**: Are all required dependencies and prerequisites listed?
+4. **Data Formats**: Are input/output formats clearly specified?
+5. **Error Handling**: How should errors and exceptions be handled?
+
+### Recommendations for Planner
+
+Please review the specification and:
+- Add missing acceptance criteria
+- Clarify ambiguous requirements
+- Specify edge case handling
+- Add concrete examples
+- Break down complex requirements into smaller steps
+
+Once clarified, please update the issue and change label from `status:needs-clarification` back to `status:ready`.
+"""
+
+        return feedback
 
     def _process_changes_requested_prs(self) -> None:
         """Find and retry PRs with changes requested."""

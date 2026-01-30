@@ -251,6 +251,66 @@ Brief summary of the changes
 
         return self._run(prompt, work_dir, timeout=300)
 
+    def review_code_with_severity(
+        self,
+        spec: str,
+        diff: str,
+        repo_context: str,
+        work_dir: Path,
+    ) -> LLMResult:
+        """
+        Review code and classify issues by severity.
+        """
+        prompt = f"""You are reviewing a pull request implementation.
+
+## Specification
+{spec}
+
+## Code Changes (diff)
+{diff}
+
+## Repository Context
+{repo_context}
+
+## Instructions
+
+1. Review the code changes against the specification
+2. Identify issues and classify each by severity:
+   - **CRITICAL**: Security vulnerabilities, data loss risks, crashes
+   - **MAJOR**: Functional failures, performance problems
+   - **MINOR**: Code style violations, refactoring recommendations
+   - **TRIVIAL**: Typos, comments, documentation
+
+3. Return a JSON response with this structure:
+```json
+{{
+    "overall_decision": "approve or request_changes",
+    "issues": [
+        {{
+            "severity": "critical|major|minor|trivial",
+            "file": "path/to/file.py",
+            "line": 42,
+            "description": "Clear description of the issue",
+            "suggestion": "How to fix it"
+        }}
+    ],
+    "summary": "Brief overall assessment"
+}}
+```
+
+## Decision Rules
+- If ANY critical or major issues exist: overall_decision = "request_changes"
+- If ONLY minor/trivial issues exist: overall_decision = "approve"
+- If NO issues: overall_decision = "approve"
+
+Start your review."""
+
+        return self._run(
+            prompt,
+            work_dir,
+            allowed_tools=["Read", "Grep", "Glob"],
+        )
+
     def create_spec(self, story: str) -> LLMResult:
         """
         Convert a user story into a technical specification.

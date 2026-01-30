@@ -277,3 +277,18 @@ class LockManager:
         # Comment with error
         comment = f"❌ **Processing failed**\n\n```\n{error_message}\n```"
         return self.github.comment_issue(issue_number, comment)
+
+    def mark_needs_clarification(
+        self,
+        issue_number: int,
+        current_status: str,
+        reason: str,
+    ) -> None:
+        """
+        Mark an issue as needing clarification.
+
+        Currently logs the event; label transition handled by caller.
+        """
+        logger.warning(
+            f"Issue #{issue_number} needs clarification (status: {current_status}): {reason}"
+        )

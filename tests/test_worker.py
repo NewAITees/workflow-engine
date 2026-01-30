@@ -19,6 +19,7 @@ worker_main = importlib.util.module_from_spec(spec)
 sys.modules["worker_main"] = worker_main
 spec.loader.exec_module(worker_main)
 WorkerAgent = worker_main.WorkerAgent
+from shared.github_client import Issue
 
 
 class TestWorkerAgent:
@@ -739,3 +740,152 @@ class TestWorkerAgent:
             "ci-failed" in str(call)
             for call in agent.github.add_pr_label.call_args_list
         )
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_specification_unclear_detection(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Test specification unclear heuristics."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+
+        assert agent._is_specification_unclear(
+            "Missing requirement",
+            "This specification is long enough to pass 100 characters. " * 2,
+        )
+        assert agent._is_specification_unclear("random failure", "short spec")
+        assert not agent._is_specification_unclear(
+            "random failure", "Detailed spec " * 20
+        )
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_technical_failure_still_marked_failed(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Technical failures continue to mark issues as failed."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        git_instance = mock_git.return_value
+        git_instance.clone_or_pull.return_value = MagicMock(success=False, error="boom")
+        git_instance.cleanup_branch.return_value = MagicMock(success=True)
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = git_instance
+        agent._is_specification_unclear = MagicMock(return_value=False)
+        agent.lock.mark_failed = MagicMock()
+        agent.lock.mark_needs_clarification = MagicMock()
+        agent.lock.try_lock_issue = MagicMock(return_value=MagicMock(success=True))
+
+        issue = Issue(number=99, title="Title", body="Long enough spec" * 10, labels=[])
+
+        assert agent._try_process_issue(issue) is False
+
+        agent.lock.mark_failed.assert_called_once()
+        agent.lock.mark_needs_clarification.assert_not_called()
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_planner_feedback_generation(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Planner feedback contains key sections."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+
+        feedback = agent._generate_planner_feedback(
+            issue_number=42,
+            spec="Detailed specification text.",
+            failure_reason="Test failed after multiple retries",
+            attempt_count=2,
+        )
+
+        assert "Issue Number" in feedback
+        assert "Failure Reason" in feedback
+        assert "Original Specification" in feedback
+        assert "Recommendations for Planner" in feedback
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_clarification_comment_posted(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Spec unclear failure triggers clarification workflow."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        git_instance = mock_git.return_value
+        git_instance.clone_or_pull.return_value = MagicMock(success=False, error="boom")
+        git_instance.cleanup_branch.return_value = MagicMock(success=True)
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = git_instance
+        agent._is_specification_unclear = MagicMock(return_value=True)
+        agent._generate_planner_feedback = MagicMock(return_value="Feedback text")
+        agent.lock.mark_needs_clarification = MagicMock()
+        agent.lock.mark_failed = MagicMock()
+        agent.lock.try_lock_issue = MagicMock(return_value=MagicMock(success=True))
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+
+        issue = Issue(number=77, title="Spec issue", body="Too short", labels=[])
+
+        result = agent._try_process_issue(issue)
+
+        assert result is False
+        agent.lock.mark_needs_clarification.assert_called_once()
+        agent.github.comment_issue.assert_called_once()
+        agent.github.add_label.assert_called_once_with(
+            issue.number, agent.STATUS_NEEDS_CLARIFICATION
+        )
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_short_spec_triggers_clarification(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Specifications shorter than threshold trigger clarification."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+
+        assert agent._is_specification_unclear("reason", "short spec")

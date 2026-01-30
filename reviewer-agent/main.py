@@ -6,18 +6,22 @@ reviews them using the configured LLM backend (codex or claude).
 """
 
 import argparse
+import json
 import logging
 import re
 import sys
 import time
 import uuid
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
+from typing import cast
 
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.config import get_agent_config
-from shared.github_client import GitHubClient, PullRequest
+from shared.github_client import GitHubClient, Issue, PullRequest
 from shared.llm_client import LLMClient
 from shared.lock import LockManager
 
@@ -30,6 +34,15 @@ logging.basicConfig(
 logger = logging.getLogger("reviewer-agent")
 
 
+class IssueSeverity(Enum):
+    """Issue severity classification."""
+
+    CRITICAL = "critical"
+    MAJOR = "major"
+    MINOR = "minor"
+    TRIVIAL = "trivial"
+
+
 class ReviewerAgent:
     """Autonomous reviewer that reviews PRs."""
 
@@ -38,6 +51,10 @@ class ReviewerAgent:
     STATUS_IN_REVIEW = "status:in-review"
     STATUS_APPROVED = "status:approved"
     STATUS_CHANGES_REQUESTED = "status:changes-requested"
+
+    # Accumulation settings
+    ACCUMULATED_THRESHOLD = 5
+    ACCUMULATED_DIR = Path.home() / ".workflow-engine" / "accumulated_fixes"
 
     def __init__(self, repo: str, config_path: str | None = None):
         self.repo = repo
@@ -52,6 +69,9 @@ class ReviewerAgent:
             self.github, agent_type="reviewer", agent_id=self.agent_id
         )
         self.llm = LLMClient(self.config)
+
+        self.accumulated_fixes_dir = self.ACCUMULATED_DIR / repo.replace("/", "-")
+        self.accumulated_fixes_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Reviewer Agent initialized for {repo}")
         logger.info(f"Agent ID: {self.agent_id}")
@@ -122,41 +142,129 @@ class ReviewerAgent:
             return False
 
         try:
-            # Get the spec from linked issue
-            spec = self._get_linked_spec(pr)
+            linked_issue = self._find_linked_issue(pr)
+            spec = linked_issue.body if linked_issue else self._get_linked_spec(pr)
 
-            # Get the diff
             diff = self.github.get_pr_diff(pr.number)
             if not diff:
                 raise RuntimeError("Failed to get PR diff")
 
-            # Review with LLM
-            logger.info(f"Reviewing with {self.config.llm_backend}...")
-            review_result = self._review_code(spec, diff)
+            logger.info(
+                f"[{self.agent_id}] Reviewing PR #{pr.number} with severity-based LLM..."
+            )
+            review_result = self.llm.review_code_with_severity(
+                spec=spec,
+                diff=diff,
+                repo_context=f"Repository: {self.repo}",
+                work_dir=Path.cwd(),
+            )
 
-            if review_result["approved"]:
-                logger.info(f"PR #{pr.number} approved")
-                self.github.approve_pr(pr.number, review_result["comment"])
-                self.github.remove_pr_label(pr.number, self.STATUS_IN_REVIEW)
-                self.github.add_pr_label(pr.number, self.STATUS_APPROVED)
+            if not review_result.success:
+                raise RuntimeError(f"Review failed: {review_result.error}")
 
-                # Auto-merge if configured
-                if self.config.auto_merge:
-                    logger.info(
-                        f"Auto-merging PR #{pr.number} with method: {self.config.merge_method}"
-                    )
-                    if self.github.merge_pr(pr.number, method=self.config.merge_method):
-                        logger.info(f"Successfully merged PR #{pr.number}")
-                    else:
-                        logger.error(f"Failed to auto-merge PR #{pr.number}")
-                        self.github.comment_pr(
-                            pr.number, "⚠️ Auto-merge failed. Please merge manually."
-                        )
-            else:
-                logger.info(f"PR #{pr.number} needs changes")
-                self.github.request_changes_pr(pr.number, review_result["comment"])
+            try:
+                review_data = json.loads(review_result.output)
+            except json.JSONDecodeError:
+                raise RuntimeError("Failed to parse review result as JSON")
+
+            issues = review_data.get("issues", [])
+            summary = review_data.get("summary", "").strip()
+
+            critical_major = [
+                issue
+                for issue in issues
+                if issue.get("severity")
+                in {
+                    IssueSeverity.CRITICAL.value,
+                    IssueSeverity.MAJOR.value,
+                }
+            ]
+            minor_trivial = [
+                issue
+                for issue in issues
+                if issue.get("severity")
+                in {
+                    IssueSeverity.MINOR.value,
+                    IssueSeverity.TRIVIAL.value,
+                }
+            ]
+
+            if critical_major:
+                logger.info(
+                    f"[{self.agent_id}] Found {len(critical_major)} critical/major issues, requesting changes"
+                )
+                feedback = "## Critical/Major Issues\n\n"
+                for issue_data in critical_major:
+                    feedback += f"**[{issue_data['severity'].upper()}] {issue_data['file']}:{issue_data['line']}**\n"
+                    feedback += f"- {issue_data['description']}\n"
+                    feedback += f"- Suggestion: {issue_data['suggestion']}\n\n"
+
+                feedback += f"\n## Summary\n{summary}"
+
                 self.github.remove_pr_label(pr.number, self.STATUS_IN_REVIEW)
                 self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
+                self.github.request_changes_pr(pr.number, feedback)
+                return True
+
+            if minor_trivial:
+                logger.info(
+                    f"[{self.agent_id}] Found {len(minor_trivial)} minor/trivial issues, accumulating..."
+                )
+
+                threshold_reached = False
+                for issue_data in minor_trivial:
+                    if self._add_accumulated_issue(
+                        pr.number,
+                        issue_data,
+                        issue_number=(linked_issue.number if linked_issue else None),
+                    ):
+                        threshold_reached = True
+
+                if threshold_reached:
+                    logger.info(
+                        f"[{self.agent_id}] Threshold reached, sending accumulated feedback"
+                    )
+                    feedback = self._format_accumulated_feedback(pr.number)
+                    feedback += f"\n\n## Summary\n{summary}\n\n"
+                    feedback += "These are accumulated minor/trivial issues. Please address them when convenient."
+
+                    self.github.remove_pr_label(pr.number, self.STATUS_IN_REVIEW)
+                    self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
+                    self.github.request_changes_pr(pr.number, feedback)
+                    self._clear_accumulated_fixes(pr.number)
+                    return True
+                else:
+                    accumulated = self._load_accumulated_fixes(
+                        pr.number,
+                        issue_number=(linked_issue.number if linked_issue else None),
+                    )
+                    current = accumulated.get("current_count", 0)
+                    threshold = accumulated.get("threshold", self.ACCUMULATED_THRESHOLD)
+                    comment = (
+                        f"✅ **Approved with {len(minor_trivial)} minor/trivial issues noted**\n\n"
+                        f"Issues are being accumulated ({current}/{threshold}). "
+                        "You'll receive consolidated feedback when the threshold is reached.\n\n"
+                        f"Summary: {summary}"
+                    )
+                    self.github.comment_pr(pr.number, comment)
+
+            logger.info(f"PR #{pr.number} approved")
+            self.github.remove_pr_label(pr.number, self.STATUS_IN_REVIEW)
+            self.github.add_pr_label(pr.number, self.STATUS_APPROVED)
+            approve_body = f"## Auto-Review by Reviewer Agent ({self.config.llm_backend})\n\n{summary}\n\n✅ Code review passed!"
+            self.github.approve_pr(pr.number, approve_body)
+
+            if self.config.auto_merge:
+                logger.info(
+                    f"Auto-merging PR #{pr.number} with method: {self.config.merge_method}"
+                )
+                if self.github.merge_pr(pr.number, method=self.config.merge_method):
+                    logger.info(f"Successfully merged PR #{pr.number}")
+                else:
+                    logger.error(f"Failed to auto-merge PR #{pr.number}")
+                    self.github.comment_pr(
+                        pr.number, "⚠️ Auto-merge failed. Please merge manually."
+                    )
 
             return True
 
@@ -174,9 +282,8 @@ class ReviewerAgent:
 
             return False
 
-    def _get_linked_spec(self, pr: PullRequest) -> str:
-        """Extract spec from linked issue."""
-        # Look for "Closes #123" or "Fixes #123" in PR body
+    def _find_linked_issue(self, pr: PullRequest) -> Issue | None:
+        """Find the linked issue for a PR."""
         patterns = [
             r"[Cc]loses?\s+#(\d+)",
             r"[Ff]ixes?\s+#(\d+)",
@@ -189,9 +296,15 @@ class ReviewerAgent:
                 issue_number = int(match.group(1))
                 issue = self.github.get_issue(issue_number)
                 if issue:
-                    return issue.body
+                    return issue
+        return None
 
-        # Fallback: use PR body as spec
+    def _get_linked_spec(self, pr: PullRequest) -> str:
+        """Extract spec from linked issue."""
+        issue = self._find_linked_issue(pr)
+        if issue:
+            return issue.body
+
         logger.warning("No linked issue found, using PR body as spec")
         return pr.body
 
@@ -243,6 +356,97 @@ class ReviewerAgent:
         )
 
         return {"approved": approved, "comment": comment}
+
+    def _load_accumulated_fixes(
+        self, pr_number: int, issue_number: int | None = None
+    ) -> dict[str, object]:
+        """Load accumulated fixes for a PR."""
+        fix_file = self.accumulated_fixes_dir / f"pr-{pr_number}.json"
+        if fix_file.exists():
+            with open(fix_file) as f:
+                data: dict[str, object] = json.load(f)
+            if issue_number and not data.get("issue_number"):
+                data["issue_number"] = issue_number
+            return data
+
+        timestamp = datetime.now().isoformat()
+        return {
+            "pr_number": pr_number,
+            "issue_number": issue_number,
+            "created_at": timestamp,
+            "last_updated": timestamp,
+            "accumulated_issues": [],
+            "threshold": self.ACCUMULATED_THRESHOLD,
+            "current_count": 0,
+        }
+
+    def _save_accumulated_fixes(self, pr_number: int, data: dict) -> None:
+        """Save accumulated fixes for a PR."""
+        data["last_updated"] = datetime.now().isoformat()
+        fix_file = self.accumulated_fixes_dir / f"pr-{pr_number}.json"
+        with open(fix_file, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def _add_accumulated_issue(
+        self,
+        pr_number: int,
+        issue: dict,
+        issue_number: int | None = None,
+    ) -> bool:
+        """
+        Add a minor/trivial issue to accumulated fixes.
+
+        Returns True if threshold reached, False otherwise.
+        """
+        data = self._load_accumulated_fixes(pr_number, issue_number=issue_number)
+        entry = dict(issue)
+        entry["review_id"] = f"review-{uuid.uuid4().hex[:8]}"
+        entry["timestamp"] = datetime.now().isoformat()
+
+        issues_list = cast(list, data["accumulated_issues"])
+        issues_list.append(entry)
+        data["current_count"] = len(issues_list)
+
+        self._save_accumulated_fixes(pr_number, data)
+
+        current_count = cast(int, data["current_count"])
+        threshold = cast(int, data["threshold"])
+        return current_count >= threshold
+
+    def _format_accumulated_feedback(self, pr_number: int) -> str:
+        """Format accumulated issues into feedback."""
+        data = self._load_accumulated_fixes(pr_number)
+        issues = cast(list, data.get("accumulated_issues", []))
+        if not issues:
+            return ""
+
+        feedback = "## Accumulated Minor/Trivial Issues\n\n"
+        feedback += f"Total issues: {len(issues)}\n\n"
+
+        by_severity: dict[str, list[dict]] = {}
+        for issue_obj in issues:
+            issue = cast(dict, issue_obj)
+            severity = issue.get("severity", "minor")
+            by_severity.setdefault(severity, []).append(issue)
+
+        for severity in ["minor", "trivial"]:
+            entries = by_severity.get(severity, [])
+            if not entries:
+                continue
+
+            feedback += f"### {severity.upper()} ({len(entries)})\n\n"
+            for issue in entries:
+                feedback += f"**{issue['file']}:{issue['line']}**\n"
+                feedback += f"- {issue['description']}\n"
+                feedback += f"- Suggestion: {issue['suggestion']}\n\n"
+
+        return feedback
+
+    def _clear_accumulated_fixes(self, pr_number: int) -> None:
+        """Clear accumulated fixes after sending feedback."""
+        fix_file = self.accumulated_fixes_dir / f"pr-{pr_number}.json"
+        if fix_file.exists():
+            fix_file.unlink()
 
 
 def main() -> None:
