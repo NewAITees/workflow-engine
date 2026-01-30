@@ -8,8 +8,10 @@ implements them using the configured LLM backend (codex or claude).
 import argparse
 import logging
 import re
+import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 # Add parent directory to path for shared imports
@@ -36,6 +38,7 @@ class WorkerAgent:
     # Status labels
     STATUS_READY = "status:ready"
     STATUS_IMPLEMENTING = "status:implementing"
+    STATUS_TESTING = "status:testing"
     STATUS_REVIEWING = "status:reviewing"
     STATUS_CHANGES_REQUESTED = "status:changes-requested"
     STATUS_FAILED = "status:failed"
@@ -48,6 +51,9 @@ class WorkerAgent:
         self.config = get_agent_config(repo, config_path)
         assert self.config.work_dir is not None
 
+        # Generate unique agent ID
+        self.agent_id = f"worker-{uuid.uuid4().hex[:8]}"
+
         # Initialize components
         self.github = GitHubClient(repo, gh_cli=self.config.gh_cli)
         self.lock = LockManager(self.github, agent_type="worker")
@@ -55,6 +61,7 @@ class WorkerAgent:
         self.git = GitOperations(repo, Path(self.config.work_dir))
 
         logger.info(f"Worker Agent initialized for {repo}")
+        logger.info(f"Agent ID: {self.agent_id}")
         logger.info(f"LLM backend: {self.config.llm_backend}")
         logger.info(f"Work directory: {self.git.workspace}")
 
@@ -354,6 +361,54 @@ Closes #{issue.number}
             )
 
             return False
+
+    def _run_tests(self, issue_number: int) -> tuple[bool, str]:
+        """
+        Run pytest for the specific issue's tests.
+
+        Args:
+            issue_number: The issue number
+
+        Returns:
+            (success, output): 成功フラグとテスト出力
+        """
+        test_file = f"tests/test_issue_{issue_number}.py"
+        test_path = self.git.path / test_file
+
+        if not test_path.exists():
+            return False, f"Test file not found: {test_file}"
+
+        logger.info(f"[{self.agent_id}] Running tests: {test_file}")
+
+        try:
+            result = subprocess.run(
+                ["pytest", test_file, "-v", "--tb=short"],
+                cwd=self.git.path,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5分タイムアウト
+            )
+
+            output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
+            success = result.returncode == 0
+
+            if success:
+                logger.info(f"[{self.agent_id}] Tests passed for issue #{issue_number}")
+            else:
+                logger.warning(
+                    f"[{self.agent_id}] Tests failed for issue #{issue_number}"
+                )
+
+            return success, output
+
+        except subprocess.TimeoutExpired:
+            error_msg = "Tests timed out after 5 minutes"
+            logger.error(f"[{self.agent_id}] {error_msg}")
+            return False, error_msg
+        except Exception as e:
+            error_msg = f"Test execution error: {str(e)}"
+            logger.error(f"[{self.agent_id}] {error_msg}")
+            return False, error_msg
 
     def _extract_issue_number(self, pr_body: str) -> int | None:
         """Extract issue number from PR body."""

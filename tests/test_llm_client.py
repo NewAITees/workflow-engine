@@ -150,3 +150,68 @@ class TestLLMClient:
         """Test that default backend is codex."""
         config = AgentConfig(repo="owner/repo")
         assert config.llm_backend == "codex"
+
+    @patch("subprocess.run")
+    def test_generate_tests_success(self, mock_run):
+        """Test successful test generation."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="# Generated tests\nimport pytest\n\ndef test_feature():\n    assert True",
+            stderr="",
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+
+        result = client.generate_tests(
+            spec="Add hello() function",
+            repo_context="Python project",
+            work_dir=Path("/tmp/test"),
+        )
+
+        assert result.success is True
+        assert "Generated tests" in result.output
+        # Verify correct tools were used
+        call_args = mock_run.call_args
+        cmd = call_args[0][0]
+        assert "codex" in cmd or "claude" in cmd
+
+    @patch("subprocess.run")
+    def test_generate_tests_failure(self, mock_run):
+        """Test failed test generation."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Test generation failed",
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+
+        result = client.generate_tests(
+            spec="Add hello() function",
+            repo_context="Python project",
+            work_dir=Path("/tmp/test"),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+
+    @patch("subprocess.run")
+    def test_generate_tests_timeout(self, mock_run):
+        """Test test generation timeout."""
+        import subprocess
+
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=600)
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+
+        result = client.generate_tests(
+            spec="Add hello() function",
+            repo_context="Python project",
+            work_dir=Path("/tmp/test"),
+        )
+
+        assert result.success is False
+        assert "timed out" in result.error

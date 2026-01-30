@@ -10,6 +10,7 @@ import logging
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 # Add parent directory to path for shared imports
@@ -42,12 +43,16 @@ class ReviewerAgent:
         self.repo = repo
         self.config = get_agent_config(repo, config_path)
 
+        # Generate unique agent ID
+        self.agent_id = f"reviewer-{uuid.uuid4().hex[:8]}"
+
         # Initialize components
         self.github = GitHubClient(repo, gh_cli=self.config.gh_cli)
         self.lock = LockManager(self.github, agent_type="reviewer")
         self.llm = LLMClient(self.config)
 
         logger.info(f"Reviewer Agent initialized for {repo}")
+        logger.info(f"Agent ID: {self.agent_id}")
         logger.info(f"LLM backend: {self.config.llm_backend}")
 
     def run(self) -> None:

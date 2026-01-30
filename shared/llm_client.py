@@ -147,6 +147,61 @@ Start by exploring the codebase, then implement the changes."""
             allowed_tools=["Edit", "Write", "Read", "Glob", "Grep", "Bash"],
         )
 
+    def generate_tests(
+        self,
+        spec: str,
+        repo_context: str,
+        work_dir: Path,
+    ) -> LLMResult:
+        """
+        Generate pytest tests based on specification.
+
+        TDD原則に従い、実装前にテストを生成する。
+
+        Args:
+            spec: The specification/requirements from the issue
+            repo_context: Brief description of the repository
+            work_dir: Working directory (cloned repo)
+
+        Returns:
+            LLMResult with success status and output
+        """
+        prompt = f"""You are writing tests for a feature BEFORE implementation (TDD).
+
+## Repository Context
+{repo_context}
+
+## Specification
+{spec}
+
+## Instructions
+1. Read the existing codebase to understand structure and patterns
+2. Identify what needs to be tested based on the specification
+3. Write pytest tests that will validate the implementation
+4. Follow TDD principles: tests should be clear, specific, and minimal
+5. Use existing test patterns if available (check tests/ directory)
+6. Create test file in the appropriate location (typically tests/ directory)
+
+Test Requirements:
+- Use pytest framework
+- Import necessary modules
+- Create test classes/functions as appropriate
+- Include edge cases mentioned in the spec
+- Add docstrings explaining what each test validates
+
+Do NOT:
+- Implement the feature (only write tests)
+- Over-complicate tests
+- Add unnecessary dependencies
+
+Start by exploring the codebase structure and existing tests."""
+
+        return self._run(
+            prompt,
+            work_dir,
+            allowed_tools=["Edit", "Write", "Read", "Glob", "Grep"],
+        )
+
     def review_code(
         self,
         spec: str,
