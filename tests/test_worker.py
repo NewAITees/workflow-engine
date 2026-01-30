@@ -220,3 +220,170 @@ class TestWorkerAgent:
 
         assert success is False
         assert "Test execution error" in output
+
+    @patch("time.sleep")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_wait_for_ci_success(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git, mock_sleep
+    ):
+        """Test _wait_for_ci when CI passes."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        # Mock CI status: success
+        mock_github_instance = mock_github.return_value
+        mock_github_instance.get_ci_status.return_value = {
+            "status": "success",
+            "conclusion": "success",
+            "checks": [],
+            "pending_count": 0,
+            "failed_count": 0,
+        }
+
+        agent = WorkerAgent("owner/repo")
+
+        passed, status = agent._wait_for_ci(123, timeout=60)
+
+        assert passed is True
+        assert status == "success"
+
+    @patch("time.sleep")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_wait_for_ci_failure(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git, mock_sleep
+    ):
+        """Test _wait_for_ci when CI fails."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+
+        # Mock CI status: failure
+        agent.github.get_ci_status = MagicMock(
+            return_value={
+                "status": "failure",
+                "conclusion": "failure",
+                "checks": [],
+                "pending_count": 0,
+                "failed_count": 1,
+            }
+        )
+
+        passed, status = agent._wait_for_ci(123, timeout=60)
+
+        assert passed is False
+        assert status == "failure"
+
+    @patch("time.sleep")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_wait_for_ci_timeout(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git, mock_sleep
+    ):
+        """Test _wait_for_ci timeout when CI stays pending."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+        agent.CI_CHECK_INTERVAL = 1  # Speed up test
+
+        # Mock CI status: always pending
+        agent.github.get_ci_status = MagicMock(
+            return_value={
+                "status": "pending",
+                "conclusion": "pending",
+                "checks": [],
+                "pending_count": 1,
+                "failed_count": 0,
+            }
+        )
+
+        passed, status = agent._wait_for_ci(123, timeout=3)
+
+        assert passed is False
+        assert status == "pending"
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_get_ci_failure_logs(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Test _get_ci_failure_logs formats logs correctly."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+
+        # Mock CI logs
+        agent.github.get_ci_logs = MagicMock(
+            return_value=[
+                {
+                    "name": "test",
+                    "conclusion": "failure",
+                    "html_url": "https://example.com/test",
+                    "output": {"title": "Test failed", "summary": "Error details here"},
+                }
+            ]
+        )
+
+        logs = agent._get_ci_failure_logs(123)
+
+        assert "# CI Failure Report" in logs
+        assert "test" in logs
+        assert "Test failed" in logs
+        assert "Error details here" in logs
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_get_ci_failure_logs_no_logs(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Test _get_ci_failure_logs when no logs available."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+
+        # Mock no CI logs
+        agent.github.get_ci_logs = MagicMock(return_value=[])
+
+        logs = agent._get_ci_failure_logs(123)
+
+        assert "no detailed logs available" in logs

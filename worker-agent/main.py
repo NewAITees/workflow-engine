@@ -42,9 +42,15 @@ class WorkerAgent:
     STATUS_REVIEWING = "status:reviewing"
     STATUS_CHANGES_REQUESTED = "status:changes-requested"
     STATUS_FAILED = "status:failed"
+    STATUS_CI_FAILED = "status:ci-failed"
 
     # Retry settings
     MAX_RETRIES = 3
+    MAX_CI_RETRIES = 3
+
+    # CI settings
+    CI_WAIT_TIMEOUT = 600  # 10 minutes
+    CI_CHECK_INTERVAL = 30  # 30 seconds
 
     def __init__(self, repo: str, config_path: str | None = None):
         self.repo = repo
@@ -599,6 +605,96 @@ Closes #{issue.number}
             error_msg = f"Test execution error: {str(e)}"
             logger.error(f"[{self.agent_id}] {error_msg}")
             return False, error_msg
+
+    def _wait_for_ci(
+        self, pr_number: int, timeout: int | None = None
+    ) -> tuple[bool, str]:
+        """
+        Wait for CI to complete (max timeout seconds).
+
+        Args:
+            pr_number: PR number
+            timeout: Maximum wait time in seconds (default: CI_WAIT_TIMEOUT)
+
+        Returns:
+            (passed, status):
+                - (True, "success") - CI passed
+                - (False, "pending") - CI timeout (still pending)
+                - (False, "failure") - CI failed
+        """
+        if timeout is None:
+            timeout = self.CI_WAIT_TIMEOUT
+
+        logger.info(
+            f"[{self.agent_id}] Waiting for CI on PR #{pr_number} (timeout: {timeout}s)"
+        )
+
+        elapsed = 0
+        while elapsed < timeout:
+            ci_status = self.github.get_ci_status(pr_number)
+
+            if ci_status["status"] == "success":
+                logger.info(f"[{self.agent_id}] CI passed on PR #{pr_number}")
+                return True, "success"
+            elif ci_status["status"] == "failure":
+                logger.warning(f"[{self.agent_id}] CI failed on PR #{pr_number}")
+                return False, "failure"
+            elif ci_status["status"] == "none":
+                logger.info(f"[{self.agent_id}] No CI configured for PR #{pr_number}")
+                return True, "success"  # No CI means pass
+
+            # Still pending, wait and check again
+            pending_count = ci_status["pending_count"]
+            logger.debug(
+                f"[{self.agent_id}] CI pending on PR #{pr_number} "
+                f"({pending_count} checks pending, elapsed: {elapsed}s)"
+            )
+
+            time.sleep(self.CI_CHECK_INTERVAL)
+            elapsed += self.CI_CHECK_INTERVAL
+
+        # Timeout
+        logger.warning(
+            f"[{self.agent_id}] CI timeout on PR #{pr_number} after {timeout}s"
+        )
+        return False, "pending"
+
+    def _get_ci_failure_logs(self, pr_number: int) -> str:
+        """
+        Get formatted CI failure logs for LLM.
+
+        Args:
+            pr_number: PR number
+
+        Returns:
+            Formatted CI error logs
+        """
+        logger.info(f"[{self.agent_id}] Fetching CI failure logs for PR #{pr_number}")
+
+        failed_checks = self.github.get_ci_logs(pr_number)
+
+        if not failed_checks:
+            return "CI failed but no detailed logs available."
+
+        # Format logs for LLM
+        logs = []
+        logs.append("# CI Failure Report\n")
+
+        for check in failed_checks:
+            logs.append(f"\n## Check: {check['name']}")
+            logs.append(f"**Status:** {check['conclusion']}")
+
+            if "html_url" in check:
+                logs.append(f"**URL:** {check['html_url']}")
+
+            if "output" in check and check["output"]:
+                output = check["output"]
+                if output.get("title"):
+                    logs.append(f"\n**Error:** {output['title']}")
+                if output.get("summary"):
+                    logs.append(f"\n**Details:**\n```\n{output['summary'][:1000]}\n```")
+
+        return "\n".join(logs)
 
     def _extract_issue_number(self, pr_body: str) -> int | None:
         """Extract issue number from PR body."""
