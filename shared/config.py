@@ -50,10 +50,15 @@ class WorkflowConfig:
 def load_config(config_path: str | None = None) -> WorkflowConfig:
     """Load configuration from YAML file."""
     if config_path is None:
-        config_path = os.environ.get(
-            "WORKFLOW_CONFIG",
-            str(Path(__file__).parent.parent / "config" / "repos.yml"),
-        )
+        env_config = os.environ.get("WORKFLOW_CONFIG")
+        if env_config:
+            config_path = env_config
+        else:
+            cwd_config = Path.cwd() / "config" / "repos.yml"
+            if cwd_config.exists():
+                config_path = str(cwd_config)
+            else:
+                config_path = str(Path(__file__).parent.parent / "config" / "repos.yml")
 
     config_file = Path(config_path)
     if not config_file.exists():

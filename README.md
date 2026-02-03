@@ -127,6 +127,26 @@ cp config/repos.yml.example config/repos.yml
 # repos.yml でリポジトリとLLMバックエンドを設定
 ```
 
+## CLIとして使う（おすすめ）
+
+このレポを改善しつつ、各プロジェクト側にコードを置かない運用ができます。
+
+```bash
+# 1. ローカルからCLIをインストール
+pipx install .
+
+# 2. エージェント実行
+workflow-engine planner owner/repo --story "..."
+workflow-engine worker owner/repo --once --verbose
+workflow-engine reviewer owner/repo --once --verbose
+```
+
+### 設定ファイルの探索順（CLI）
+
+1. `WORKFLOW_CONFIG` 環境変数（指定されている場合）
+2. 実行ディレクトリの `./config/repos.yml`（存在する場合）
+3. このリポジトリの `config/repos.yml`
+
 ## 開発者向けコマンド
 
 ```bash
