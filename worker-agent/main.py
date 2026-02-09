@@ -44,6 +44,7 @@ class WorkerAgent:
     STATUS_FAILED = "status:failed"
     STATUS_CI_FAILED = "status:ci-failed"
     STATUS_NEEDS_CLARIFICATION = "status:needs-clarification"
+    RETRY_MARKER = "WORKER_RETRY"
 
     # Retry settings
     MAX_RETRIES = 3
@@ -600,29 +601,41 @@ Once clarified, please update the issue and change label from `status:needs-clar
             f"[{self.agent_id}] Attempting to retry PR #{pr.number}: {pr.title}"
         )
 
-        # Get retry count
-        retry_count = self._get_retry_count(pr.number)
+        # Resolve linked issue first; retry persistence is issue-based
+        issue_number = self._extract_issue_number(pr.body)
+        if not issue_number:
+            logger.error(
+                f"[{self.agent_id}] PR #{pr.number} has no linked issue; cannot retry safely"
+            )
+            self.github.comment_pr(
+                pr.number,
+                "⚠️ Cannot determine linked issue from PR body. "
+                "Auto-retry has been stopped for safety.",
+            )
+            self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
+            self.github.add_pr_label(pr.number, self.STATUS_FAILED)
+            return False
+
+        # Get retry count from linked issue (with fallback to old PR marker)
+        retry_count = self._get_retry_count(issue_number, pr.number)
         logger.info(
-            f"[{self.agent_id}] PR #{pr.number} retry count: {retry_count}/{self.MAX_RETRIES}"
+            f"[{self.agent_id}] Issue #{issue_number} retry count: {retry_count}/{self.MAX_RETRIES}"
         )
 
         if retry_count >= self.MAX_RETRIES:
             logger.warning(
                 f"[{self.agent_id}] PR #{pr.number} exceeded max retries, escalating to Planner"
             )
-            # Extract issue number
-            issue_number = self._extract_issue_number(pr.body)
-            if issue_number:
-                self.github.comment_issue(
-                    issue_number,
-                    f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
-                    f"PR #{pr.number} could not pass review.\n\n"
-                    f"**Action needed**: Please review the specification and provide more details or clarification.\n\n"
-                    f"Review feedback:\n{self._get_latest_review_feedback(pr.number)}",
-                )
-                # Remove changes-requested label and add failed
-                self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
-                self.github.add_pr_label(pr.number, self.STATUS_FAILED)
+            self.github.comment_issue(
+                issue_number,
+                f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
+                f"PR #{pr.number} could not pass review.\n\n"
+                f"**Action needed**: Please review the specification and provide more details or clarification.\n\n"
+                f"Review feedback:\n{self._get_latest_review_feedback(pr.number)}",
+            )
+            # Remove changes-requested label and add failed
+            self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
+            self.github.add_pr_label(pr.number, self.STATUS_FAILED)
             return False
 
         # Try to acquire lock (changes-requested -> implementing)
@@ -637,11 +650,6 @@ Once clarified, please update the issue and change label from `status:needs-clar
             return False
 
         try:
-            # Get the linked issue
-            issue_number = self._extract_issue_number(pr.body)
-            if not issue_number:
-                raise RuntimeError("Cannot find linked issue in PR body")
-
             issue = self.github.get_issue(issue_number)
             if not issue:
                 raise RuntimeError(f"Issue #{issue_number} not found")
@@ -757,7 +765,7 @@ Once clarified, please update the issue and change label from `status:needs-clar
                 raise RuntimeError(f"Push failed: {push_result.error}")
 
             # Record retry
-            self._record_retry(pr.number, retry_count + 1)
+            self._record_retry(issue_number, pr.number, retry_count + 1)
 
             # Add reviewing label
             self.github.add_pr_label(pr.number, self.STATUS_REVIEWING)
@@ -906,23 +914,18 @@ Please analyze and fix the CI failures.
 
             # Always record a failed retry attempt so we don't loop forever
             failed_retry_count = retry_count + 1
-            self.github.comment_pr(
-                pr.number,
-                f"🔄 **Retry attempt failed ({failed_retry_count}/{self.MAX_RETRIES})**\n\n"
-                f"RETRY:{failed_retry_count}\n\n"
-                f"Error: {e}",
+            self._record_retry(
+                issue_number, pr.number, failed_retry_count, error=str(e)
             )
 
             # If retry budget is exhausted, stop auto-retry and escalate
             if failed_retry_count >= self.MAX_RETRIES:
-                issue_number = self._extract_issue_number(pr.body)
-                if issue_number:
-                    self.github.comment_issue(
-                        issue_number,
-                        f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
-                        f"PR #{pr.number} could not be stabilized due to repeated retry errors.\n\n"
-                        "Please review the specification and/or implementation strategy.",
-                    )
+                self.github.comment_issue(
+                    issue_number,
+                    f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
+                    f"PR #{pr.number} could not be stabilized due to repeated retry errors.\n\n"
+                    "Please review the specification and/or implementation strategy.",
+                )
                 self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
                 self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
                 self.github.remove_pr_label(pr.number, self.STATUS_TESTING)
@@ -1094,28 +1097,51 @@ Please analyze and fix the CI failures.
 
         return None
 
-    def _get_retry_count(self, pr_number: int) -> int:
-        """Get current retry count from PR comments."""
-        comments = self.github.get_issue_comments(pr_number, limit=50)
+    def _get_retry_count(self, issue_number: int, pr_number: int | None = None) -> int:
+        """Get current retry count from Issue comments (fallback to legacy PR marker)."""
+        comments = self.github.get_issue_comments(issue_number, limit=100)
         retry_count = 0
 
         for comment in comments:
             body = comment.get("body", "")
-            # Look for RETRY:N marker
-            match = re.search(r"RETRY:(\d+)", body)
+            # Primary marker: WORKER_RETRY:N
+            match = re.search(rf"{self.RETRY_MARKER}:(\d+)", body)
+            # Backward compatibility with legacy RETRY:N marker
+            if not match:
+                match = re.search(r"RETRY:(\d+)", body)
             if match:
                 count = int(match.group(1))
                 retry_count = max(retry_count, count)
 
+        # Migration fallback: also read legacy PR comment marker if provided
+        if pr_number is not None and pr_number != issue_number:
+            pr_comments = self.github.get_issue_comments(pr_number, limit=50)
+            for comment in pr_comments:
+                body = comment.get("body", "")
+                match = re.search(r"RETRY:(\d+)", body)
+                if match:
+                    count = int(match.group(1))
+                    retry_count = max(retry_count, count)
+
         return retry_count
 
-    def _record_retry(self, pr_number: int, retry_count: int) -> None:
-        """Record retry attempt in PR comment."""
-        self.github.comment_pr(
-            pr_number,
-            f"🔄 **Auto-retry #{retry_count}**\n\nRETRY:{retry_count}\n\n"
-            f"Worker Agent is addressing review feedback and regenerating implementation.",
+    def _record_retry(
+        self,
+        issue_number: int,
+        pr_number: int,
+        retry_count: int,
+        error: str | None = None,
+    ) -> None:
+        """Record retry attempt in linked Issue comment for persistence."""
+        body = (
+            f"🔄 **Auto-retry #{retry_count}**\n\n"
+            f"{self.RETRY_MARKER}:{retry_count}\n\n"
+            f"Linked PR: #{pr_number}\n\n"
+            "Worker Agent is addressing review feedback and regenerating implementation."
         )
+        if error:
+            body += f"\n\nError: {error}"
+        self.github.comment_issue(issue_number, body)
 
     def _get_latest_review_feedback(self, pr_number: int) -> str:
         """Get the most recent review feedback."""
