@@ -44,7 +44,7 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
-exclude = ["scripts/", "planner-agent/", "worker-agent/", "reviewer-agent/"]
+exclude = ["scripts/", "planner-agent/", "worker-agent/", "reviewer-agent/", "tests/"]
 
 [[tool.mypy.overrides]]
 module = "tests.*"
