@@ -19,7 +19,7 @@ worker_main = importlib.util.module_from_spec(spec)
 sys.modules["worker_main"] = worker_main
 spec.loader.exec_module(worker_main)
 WorkerAgent = worker_main.WorkerAgent
-from shared.github_client import Issue
+from shared.github_client import Issue, PullRequest
 
 
 class TestWorkerAgent:
@@ -740,6 +740,67 @@ class TestWorkerAgent:
             "ci-failed" in str(call)
             for call in agent.github.add_pr_label.call_args_list
         )
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_retry_exception_marks_failed_after_max_retries(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Retry exceptions should be counted and eventually stop auto-retry."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        git_instance = mock_git.return_value
+        git_instance.workspace = "/tmp/test/workspace"
+        git_instance.clone_or_pull.return_value = MagicMock(success=False, error="boom")
+
+        lock_instance = mock_lock.return_value
+        lock_instance.try_lock_pr.return_value = MagicMock(success=True)
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = git_instance
+        agent.lock = lock_instance
+        agent.github.comment_pr = MagicMock(return_value=True)
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.remove_pr_label = MagicMock(return_value=True)
+        agent.github.add_pr_label = MagicMock(return_value=True)
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=123,
+                title="Linked issue",
+                body="Spec body",
+                labels=[agent.STATUS_READY],
+            )
+        )
+
+        # Simulate last allowed retry: next failure should mark as failed
+        agent._get_retry_count = MagicMock(return_value=agent.MAX_RETRIES - 1)
+
+        pr = PullRequest(
+            number=42,
+            title="Retry PR",
+            body="Closes #123",
+            labels=[agent.STATUS_CHANGES_REQUESTED],
+            head_ref="auto/issue-123",
+            base_ref="main",
+        )
+
+        result = agent._try_retry_pr(pr)
+
+        assert result is False
+        agent.github.comment_pr.assert_any_call(
+            pr.number,
+            f"🔄 **Retry attempt failed ({agent.MAX_RETRIES}/{agent.MAX_RETRIES})**\n\n"
+            f"RETRY:{agent.MAX_RETRIES}\n\n"
+            "Error: Failed to prepare workspace: boom",
+        )
+        agent.github.add_pr_label.assert_any_call(pr.number, agent.STATUS_FAILED)
+        agent.github.comment_issue.assert_called_once()
 
     @patch("shared.git_operations.GitOperations")
     @patch("shared.llm_client.LLMClient")

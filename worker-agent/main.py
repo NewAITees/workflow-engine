@@ -904,7 +904,32 @@ Please analyze and fix the CI failures.
         except Exception as e:
             logger.error(f"[{self.agent_id}] Failed to retry PR #{pr.number}: {e}")
 
-            # Reset to changes-requested
+            # Always record a failed retry attempt so we don't loop forever
+            failed_retry_count = retry_count + 1
+            self.github.comment_pr(
+                pr.number,
+                f"🔄 **Retry attempt failed ({failed_retry_count}/{self.MAX_RETRIES})**\n\n"
+                f"RETRY:{failed_retry_count}\n\n"
+                f"Error: {e}",
+            )
+
+            # If retry budget is exhausted, stop auto-retry and escalate
+            if failed_retry_count >= self.MAX_RETRIES:
+                issue_number = self._extract_issue_number(pr.body)
+                if issue_number:
+                    self.github.comment_issue(
+                        issue_number,
+                        f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
+                        f"PR #{pr.number} could not be stabilized due to repeated retry errors.\n\n"
+                        "Please review the specification and/or implementation strategy.",
+                    )
+                self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
+                self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
+                self.github.remove_pr_label(pr.number, self.STATUS_TESTING)
+                self.github.add_pr_label(pr.number, self.STATUS_FAILED)
+                return False
+
+            # Otherwise, reset to changes-requested for the next retry cycle
             self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
             self.github.remove_pr_label(pr.number, self.STATUS_TESTING)
             self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
