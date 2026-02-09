@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from git_operations import GitOperations
+
 from shared.config import get_agent_config
 from shared.github_client import GitHubClient, Issue, PullRequest
 from shared.llm_client import LLMClient
