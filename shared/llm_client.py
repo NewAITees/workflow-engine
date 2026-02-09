@@ -275,7 +275,12 @@ Brief summary of the changes
 ## Instructions
 
 1. Review the code changes against the specification
-2. Identify issues and classify each by severity:
+2. Review BOTH production code and test code in the diff
+3. Validate test adequacy for changed behavior:
+   - Missing tests for new/changed logic should be reported
+   - Weak assertions or missing edge cases should be reported
+   - Coverage gaps around critical paths should be reported as at least MAJOR
+4. Identify issues and classify each by severity:
    - **CRITICAL**: Security vulnerabilities, data loss risks, crashes
    - **MAJOR**: Functional failures, performance problems
    - **MINOR**: Code style violations, refactoring recommendations
