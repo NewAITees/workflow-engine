@@ -215,3 +215,27 @@ class TestLLMClient:
 
         assert result.success is False
         assert "timed out" in result.error
+
+    @patch.object(LLMClient, "_run")
+    def test_review_prompt_includes_test_and_coverage_checks(self, mock_run):
+        """Reviewer prompt should enforce test code and coverage gap checks."""
+        mock_run.return_value = MagicMock(success=True, output='{"issues":[]}')
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+
+        result = client.review_code_with_severity(
+            spec="Implement feature X",
+            diff="diff --git a/app.py b/app.py",
+            repo_context="Repository: owner/repo",
+            work_dir=Path("/tmp/test"),
+        )
+
+        assert result.success is True
+        call_args = mock_run.call_args
+        prompt = call_args[0][0]
+        assert "Review BOTH production code and test code in the diff" in prompt
+        assert (
+            "Coverage gaps around critical paths should be reported as at least MAJOR"
+            in prompt
+        )
