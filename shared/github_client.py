@@ -182,6 +182,20 @@ class GitHubClient:
         result = self._run(args, check=False)
         return result.returncode == 0
 
+    def update_issue_body(self, issue_number: int, body: str) -> bool:
+        """Update issue body."""
+        args = [
+            "issue",
+            "edit",
+            str(issue_number),
+            "--repo",
+            self.repo,
+            "--body",
+            body,
+        ]
+        result = self._run(args, check=False)
+        return result.returncode == 0
+
     def get_issue_comments(self, issue_number: int, limit: int = 30) -> list[dict]:
         """Get comments on an issue."""
         args = [
