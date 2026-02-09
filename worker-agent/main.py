@@ -18,14 +18,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # Add parent directory to path for shared imports
+sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from git_operations import GitOperations
 from shared.config import get_agent_config
-from shared.git_operations import GitOperations
 from shared.github_client import GitHubClient, Issue, PullRequest
 from shared.llm_client import LLMClient
 from shared.lock import LockManager
-from shared.workspace import WorkspaceManager
 
 # Configure logging
 logging.basicConfig(
@@ -85,7 +85,6 @@ class WorkerAgent:
         )
         self.llm = LLMClient(self.config)
         self.git = GitOperations(repo, Path(self.config.work_dir))
-        self.workspace_manager = WorkspaceManager(repo, self.git.path)
 
         logger.info(f"Worker Agent initialized for {repo}")
         logger.info(f"Agent ID: {self.agent_id}")
@@ -274,7 +273,7 @@ class WorkerAgent:
     def _issue_workspace(
         self, issue_number: int, branch_name: str
     ) -> Generator[GitOperations, None, None]:
-        """Provide a per-issue worktree and fall back to legacy workspace if needed."""
+        """Provide an issue-specific worktree and guarantee cleanup."""
         if not isinstance(self.git, GitOperations):
             clone_result = self.git.clone_or_pull()
             if not clone_result.success:
@@ -287,50 +286,39 @@ class WorkerAgent:
             yield self.git
             return
 
-        default_branch = self.github.get_default_branch()
-        worktree_id = f"{self.agent_id}-issue-{issue_number}"
-
-        try:
-            with self.workspace_manager.worktree(
-                branch_name,
-                worktree_id,
-                create_branch=True,
-                base_branch=default_branch,
-            ) as work_git:
-                yield work_git
-                return
-        except Exception as e:
-            # Branch may already exist from a previous attempt.
-            if "already exists" in str(e):
-                logger.warning(
-                    f"[{self.agent_id}] Worktree branch already exists for issue #{issue_number}; "
-                    "retrying by reusing existing branch."
-                )
-                try:
-                    with self.workspace_manager.worktree(
-                        branch_name,
-                        worktree_id,
-                        create_branch=False,
-                        base_branch=default_branch,
-                    ) as work_git:
-                        yield work_git
-                        return
-                except Exception as retry_error:
-                    e = retry_error
-            logger.warning(
-                f"[{self.agent_id}] Worktree setup failed for issue #{issue_number}: {e}. "
-                "Falling back to legacy workspace flow."
-            )
-
         clone_result = self.git.clone_or_pull()
         if not clone_result.success:
             raise RuntimeError(f"Failed to prepare workspace: {clone_result.error}")
 
-        branch_result = self.git.create_branch(branch_name)
-        if not branch_result.success:
-            raise RuntimeError(f"Failed to create branch: {branch_result.error}")
+        create_result = self.git.create_worktree(issue_number, branch_name)
+        if not create_result.success or create_result.value is None:
+            raise RuntimeError(
+                "ESCALATION:worker worktree creation failed: "
+                f"{create_result.error or 'unknown error'}"
+            )
 
-        yield self.git
+        worktree_path = create_result.value
+        worktree_git = GitOperations(self.repo, workspace_path=worktree_path)
+
+        try:
+            yield worktree_git
+        finally:
+            remove_result = self.git.remove_worktree(worktree_path)
+            if remove_result.success:
+                return
+
+            logger.warning(
+                f"[{self.agent_id}] Worktree cleanup retry for issue #{issue_number}: "
+                f"{remove_result.error}"
+            )
+            retry_result = self.git.remove_worktree(worktree_path, force=True)
+            if retry_result.success:
+                return
+
+            raise RuntimeError(
+                "ESCALATION:worker worktree cleanup final failure after retries: "
+                f"{retry_result.error or 'unknown error'}"
+            )
 
     def _try_process_issue(self, issue: Issue) -> bool:
         """
@@ -695,7 +683,22 @@ Please analyze and fix the CI failures.
             )
 
             failure_reason = str(e)
-            if "Tests failed after" in failure_reason:
+            if (
+                "ESCALATION:worker" in failure_reason
+                or "worktree cleanup final failure" in failure_reason
+                or "worktree creation failed" in failure_reason
+            ):
+                self.lock.mark_failed(
+                    issue.number,
+                    self.STATUS_IMPLEMENTING,
+                    failure_reason,
+                )
+                self._comment_worker_escalation(
+                    issue.number,
+                    "worktree-lifecycle-failure",
+                    failure_reason,
+                )
+            elif "Tests failed after" in failure_reason:
                 self._comment_worker_escalation(
                     issue.number,
                     "test-retry-limit",

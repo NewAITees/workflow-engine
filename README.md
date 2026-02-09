@@ -235,6 +235,19 @@ uv run worker-agent/main.py owner/repo --once
 uv run worker-agent/main.py owner/repo --verbose
 ```
 
+### Worker の Worktree 運用
+
+- ベース clone は従来どおり `~/.workflow-engine/workspaces/<owner_repo>/` を維持します。
+- Issue 処理開始時に Worker は `clone_or_pull()` 後、同階層へ専用 worktree を作成します。
+  - 命名規則: `<owner-repo>-issue-<issue_number>-<pid>-<epoch_ns>`
+  - 例: `~/.workflow-engine/workspaces/owner-repo-issue-123-4242-1739100000000000000`
+- Worktree 作成時に `git worktree add -b <branch> <path> <base_branch>` を実行し、作業は必ずその worktree 内で行います。
+- cleanup 方針:
+  - 正常終了/失敗/例外を問わず `finally` で `git worktree remove <path>` を実行
+  - 失敗時は `git worktree remove -f <path>` を1回再試行
+  - 最終失敗時は `status:failed` と `ESCALATION:worker` を記録します
+- 既存ブランチが残っていて worktree 作成不能な場合は fail-fast し、`ESCALATION:worker` で運用側に通知します。
+
 ### Reviewer Agent（デーモン）
 
 ```bash

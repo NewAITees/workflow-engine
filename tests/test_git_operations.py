@@ -208,3 +208,51 @@ class TestGitOperations:
 
         assert result.success is True
         mock_create.assert_called_once_with("feature")
+
+
+class TestWorkerGitOperations:
+    """Tests for worker-local GitOperations worktree APIs."""
+
+    @staticmethod
+    def _load_worker_git_ops():
+        import importlib.util
+        import sys
+
+        target = Path(__file__).parent.parent / "worker-agent" / "git_operations.py"
+        spec = importlib.util.spec_from_file_location("worker_git_ops_test", target)
+        if spec is None or spec.loader is None:
+            raise ImportError("Failed to load worker-agent/git_operations.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["worker_git_ops_test"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_build_worktree_path_unique(self, tmp_path):
+        """Worktree path should include issue scope and be unique."""
+        mod = self._load_worker_git_ops()
+        git = mod.GitOperations("owner/repo", work_base=tmp_path)
+
+        first = git.build_worktree_path(7)
+        second = git.build_worktree_path(7)
+
+        assert first != second
+        assert "issue-7" in first.name
+        assert first.parent == second.parent
+
+    @patch("subprocess.run")
+    def test_remove_worktree_supports_force(self, mock_run, tmp_path):
+        """remove_worktree should pass -f when force=True."""
+        mod = self._load_worker_git_ops()
+        git = mod.GitOperations("owner/repo", work_base=tmp_path)
+        path = tmp_path / "owner-repo-issue-7-x"
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        git.remove_worktree(path, force=False)
+        git.remove_worktree(path, force=True)
+
+        first = mock_run.call_args_list[0].args[0]
+        second = mock_run.call_args_list[1].args[0]
+
+        assert first == ["git", "worktree", "remove", str(path)]
+        assert second == ["git", "worktree", "remove", "-f", str(path)]
