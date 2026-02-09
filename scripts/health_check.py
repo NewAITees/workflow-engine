@@ -63,6 +63,30 @@ def check_config(config_path: Path) -> bool:
         return False
 
 
+def check_execution_source_alignment() -> bool:
+    """
+    Warn if `workflow-engine` command points to an installed copy outside repo.
+    """
+    cli_path = shutil.which("workflow-engine")
+    if not cli_path:
+        print_warning("workflow-engine command not found (optional)")
+        return True
+
+    resolved = Path(cli_path).resolve()
+    try:
+        resolved.relative_to(project_root)
+        print_success("workflow-engine command points to local repository")
+        return True
+    except ValueError:
+        print_warning(
+            "workflow-engine command points to an external install.\n"
+            f"- command path: {resolved}\n"
+            f"- local repo: {project_root}\n"
+            "If you changed local code, run `pipx install . --force` or use `uv run ...`."
+        )
+        return True
+
+
 def main():
     print_header("Workflow Engine Health Check")
 
@@ -85,6 +109,10 @@ def main():
     config_path = project_root / "config" / "repos.yml"
     if not check_config(config_path):
         all_passed = False
+
+    # 4. Check execution source alignment
+    console.rule("[bold]Execution Source[/bold]")
+    check_execution_source_alignment()
 
     # summary
     console.rule("[bold]Summary[/bold]")
