@@ -910,9 +910,11 @@ Once clarified, please update the issue and change label from `status:needs-clar
             # Update the branch
             branch_name = pr.head_ref
             logger.info(f"[{self.agent_id}] Updating branch: {branch_name}")
-            branch_result = self.git.create_branch(branch_name)
+            branch_result = self.git.checkout_branch_from_remote(branch_name)
             if not branch_result.success:
                 raise RuntimeError(f"Failed to update branch: {branch_result.error}")
+
+            self._ensure_retry_tests_available(issue, feedback)
 
             # TDD retry loop with test execution
             test_retry_count = 0
@@ -965,7 +967,9 @@ Once clarified, please update the issue and change label from `status:needs-clar
 
                 # Run tests
                 logger.info(f"[{self.agent_id}] Running tests...")
-                test_passed, test_output = self._run_tests(issue_number)
+                test_passed, test_output = self._run_tests(
+                    issue_number, git_path=self.git.path
+                )
 
                 if test_passed:
                     logger.info(
@@ -1282,6 +1286,53 @@ Please analyze and fix the CI failures.
             f"[{self.agent_id}] Could not normalize generated tests to "
             f"tests/test_issue_{issue_number}.py automatically."
         )
+
+    def _ensure_retry_tests_available(self, issue: Issue, feedback: str) -> None:
+        """
+        Ensure retry flow has an issue-specific test file to execute.
+
+        When tests are missing on the PR branch, regenerate tests before retrying
+        implementation so the fix loop remains deterministic.
+        """
+        if self._locate_issue_test_file(issue.number, self.git.path) is not None:
+            return
+
+        logger.warning(
+            f"[{self.agent_id}] Missing tests/test_issue_{issue.number}.py on retry branch. "
+            "Regenerating tests before implementation retry."
+        )
+        before_files = self._snapshot_test_files(self.git.path)
+        test_result = self.llm.generate_tests(
+            spec=(
+                f"{issue.body}\n\n"
+                "## Review Feedback Context\n"
+                f"{feedback}\n\n"
+                "## Test File Requirement\n"
+                f"Create/overwrite exactly one issue test file at "
+                f"`tests/test_issue_{issue.number}.py`."
+            ),
+            repo_context=(
+                f"Repository: {self.repo}\n"
+                f"Required test path: tests/test_issue_{issue.number}.py"
+            ),
+            work_dir=self.git.path,
+        )
+        if not test_result.success:
+            raise RuntimeError(
+                f"Retry test generation failed: {test_result.error or 'unknown error'}"
+            )
+
+        self._ensure_issue_test_file(issue.number, self.git.path, before_files)
+        if self._locate_issue_test_file(issue.number, self.git.path) is None:
+            raise RuntimeError(
+                f"Retry tests still missing after generation: tests/test_issue_{issue.number}.py"
+            )
+
+        commit_result = self.git.commit(
+            f"test: refresh tests for #{issue.number} before retry\n\n{issue.title}"
+        )
+        if not commit_result.success and commit_result.error != "No changes to commit":
+            raise RuntimeError(f"Retry test commit failed: {commit_result.error}")
 
     def _locate_issue_test_file(
         self, issue_number: int, repo_path: Path

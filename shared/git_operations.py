@@ -120,6 +120,23 @@ class GitOperations:
         # Create new branch
         return self._run(["checkout", "-b", branch_name])
 
+    def checkout_branch_from_remote(self, branch_name: str) -> GitResult:
+        """
+        Checkout a local branch from origin/<branch_name> if it exists.
+
+        Falls back to creating a fresh branch from default branch when
+        the remote branch does not exist.
+        """
+        self._run(["fetch", "origin"], check=False)
+        remote_ref = f"origin/{branch_name}"
+        remote_exists = self._run(["rev-parse", "--verify", remote_ref], check=False)
+
+        if remote_exists.success:
+            # Re-anchor local branch to the PR head tip to avoid stale/main divergence.
+            return self._run(["checkout", "-B", branch_name, remote_ref])
+
+        return self.create_branch(branch_name)
+
     def stage_all(self) -> GitResult:
         """Stage all changes."""
         return self._run(["add", "-A"])

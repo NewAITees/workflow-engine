@@ -172,3 +172,39 @@ class TestGitOperations:
         result = self.git.commit("test commit")
 
         assert result.success is True
+
+    @patch.object(GitOperations, "_run")
+    def test_checkout_branch_from_remote_existing(self, mock_run):
+        """Checkout should track remote branch when it exists."""
+        mock_run.side_effect = [
+            GitResult(success=True, output=""),  # fetch origin
+            GitResult(success=True, output="origin/feature\n"),  # rev-parse verify
+            GitResult(success=True, output=""),  # checkout -B feature origin/feature
+        ]
+
+        result = self.git.checkout_branch_from_remote("feature")
+
+        assert result.success is True
+        assert mock_run.call_args_list[2][0][0] == [
+            "checkout",
+            "-B",
+            "feature",
+            "origin/feature",
+        ]
+
+    @patch.object(GitOperations, "create_branch")
+    @patch.object(GitOperations, "_run")
+    def test_checkout_branch_from_remote_fallback_to_create(
+        self, mock_run, mock_create
+    ):
+        """Checkout should create new branch when remote branch does not exist."""
+        mock_run.side_effect = [
+            GitResult(success=True, output=""),  # fetch origin
+            GitResult(success=False, output="", error="not found"),  # rev-parse
+        ]
+        mock_create.return_value = GitResult(success=True, output="created")
+
+        result = self.git.checkout_branch_from_remote("feature")
+
+        assert result.success is True
+        mock_create.assert_called_once_with("feature")

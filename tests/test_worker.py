@@ -236,6 +236,47 @@ class TestWorkerAgent:
         assert not generated.exists()
         assert (tests_dir / "test_issue_7.py").exists()
 
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_ensure_retry_tests_available_generates_and_commits_when_missing(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git, tmp_path
+    ):
+        """Retry flow should regenerate tests when issue test file is missing."""
+        from shared.llm_client import LLMResult
+
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        repo_path = tmp_path / "repo"
+        tests_dir = repo_path / "tests"
+        tests_dir.mkdir(parents=True)
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = MagicMock()
+        agent.git.path = repo_path
+        agent.git.commit = MagicMock(return_value=MagicMock(success=True, error=None))
+
+        def _generate_tests_side_effect(*args, **kwargs):
+            generated = tests_dir / "test_anything.py"
+            generated.write_text("def test_x():\n    assert True\n")
+            return LLMResult(success=True, output="ok")
+
+        agent.llm.generate_tests = MagicMock(side_effect=_generate_tests_side_effect)
+
+        issue = Issue(number=4, title="retry", body="spec body", labels=[])
+        agent._ensure_retry_tests_available(issue, "feedback")
+
+        agent.llm.generate_tests.assert_called_once()
+        agent.git.commit.assert_called_once()
+        assert (tests_dir / "test_issue_4.py").exists()
+
     @patch("subprocess.run")
     @patch("shared.git_operations.GitOperations")
     @patch("shared.llm_client.LLMClient")
