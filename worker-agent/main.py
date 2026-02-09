@@ -505,6 +505,14 @@ Closes #{issue.number}
                 # Extract PR number from URL
                 pr_number = int(pr_url.split("/")[-1])
 
+                self.github.comment_pr(
+                    pr_number,
+                    f"🧪 **Local TDD validation passed**\n\n"
+                    f"- Tests generated before implementation\n"
+                    f"- Local test attempts: {test_retry_count + 1}/{self.MAX_RETRIES}\n"
+                    f"- Waiting for CI verification",
+                )
+
                 # Wait for CI and handle failures with retry loop
                 logger.info(f"[{self.agent_id}] Waiting for CI to complete...")
                 ci_passed, ci_status = self._wait_for_ci(
@@ -601,8 +609,11 @@ Please analyze and fix the CI failures.
                             f"[{self.agent_id}] CI failed after {ci_retry_count} fix attempts"
                         )
 
-                        # Mark PR with ci-failed status
+                        # Mark PR for changes requested due to failed tests/checks
                         self.github.add_pr_label(pr_number, self.STATUS_CI_FAILED)
+                        self.github.add_pr_label(
+                            pr_number, self.STATUS_CHANGES_REQUESTED
+                        )
                         self.github.remove_pr_label(pr_number, self.STATUS_REVIEWING)
 
                         self.github.comment_pr(
@@ -1077,6 +1088,7 @@ Please analyze and fix the CI failures.
 
                     # Mark PR with ci-failed status
                     self.github.add_pr_label(pr.number, self.STATUS_CI_FAILED)
+                    self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
                     self.github.remove_pr_label(pr.number, self.STATUS_REVIEWING)
 
                     self.github.comment_pr(

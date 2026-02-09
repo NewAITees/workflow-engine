@@ -633,6 +633,11 @@ class TestWorkerAgent:
             "ci-failed" in str(call)
             for call in agent.github.add_pr_label.call_args_list
         )
+        # CI test/check failures should also return PR to changes-requested
+        assert any(
+            "changes-requested" in str(call)
+            for call in agent.github.add_pr_label.call_args_list
+        )
 
     @patch("time.sleep")
     @patch("subprocess.run")
@@ -740,6 +745,11 @@ class TestWorkerAgent:
         assert not any(
             "ci-failed" in str(call)
             for call in agent.github.add_pr_label.call_args_list
+        )
+        # Should comment local TDD result on PR
+        assert any(
+            "Local TDD validation passed" in str(call)
+            for call in agent.github.comment_pr.call_args_list
         )
 
     @patch("shared.git_operations.GitOperations")
