@@ -13,6 +13,7 @@ repositories:
     log_level: INFO         # Logging level
     auto_merge: false       # Auto-merge approved PRs (default: false)
     merge_method: squash    # "squash" (default), "merge", or "rebase"
+    stale_lock_timeout_minutes: 30  # Recover stale implementing locks
 
   # Example with Claude backend and auto-merge enabled
   # - name: myorg/myproject

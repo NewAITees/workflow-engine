@@ -805,6 +805,161 @@ class TestWorkerAgent:
     @patch("shared.lock.LockManager")
     @patch("shared.github_client.GitHubClient")
     @patch("shared.config.get_agent_config")
+    def test_process_stale_issue_lock_recovers_to_ready(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Stale issue implementing lock should be restored to ready."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+            stale_lock_timeout_minutes=30,
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+        agent.github.list_issues = MagicMock(
+            return_value=[
+                Issue(
+                    number=101,
+                    title="Stale issue",
+                    body="spec",
+                    labels=[agent.STATUS_IMPLEMENTING],
+                )
+            ]
+        )
+        agent.github.list_prs = MagicMock(return_value=[])
+        agent.github.get_issue_comments = MagicMock(
+            return_value=[
+                {
+                    "body": "ACK:worker:worker-123:1",
+                    "created_at": "2020-01-01T00:00:00Z",
+                }
+            ]
+        )
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.comment_issue = MagicMock(return_value=True)
+
+        recovered = agent._process_stale_locks()
+
+        assert recovered is True
+        agent.github.remove_label.assert_called_once_with(
+            101, agent.STATUS_IMPLEMENTING
+        )
+        agent.github.add_label.assert_called_once_with(101, agent.STATUS_READY)
+        agent.github.comment_issue.assert_called_once()
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_process_stale_pr_lock_recovers_to_changes_requested(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Stale PR implementing lock should restore to changes-requested when reviewed."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+            stale_lock_timeout_minutes=30,
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+        agent.github.list_issues = MagicMock(return_value=[])
+        agent.github.list_prs = MagicMock(
+            return_value=[
+                PullRequest(
+                    number=202,
+                    title="Stale PR",
+                    body="Closes #1",
+                    labels=[agent.STATUS_IMPLEMENTING],
+                    head_ref="auto/issue-1",
+                    base_ref="main",
+                )
+            ]
+        )
+        agent.github.get_issue_comments = MagicMock(
+            return_value=[
+                {
+                    "body": "ACK:worker:worker-123:1",
+                    "created_at": "2020-01-01T00:00:00Z",
+                }
+            ]
+        )
+        agent.github.get_pr_reviews = MagicMock(
+            return_value=[{"state": "CHANGES_REQUESTED"}]
+        )
+        agent.github.remove_pr_label = MagicMock(return_value=True)
+        agent.github.add_pr_label = MagicMock(return_value=True)
+        agent.github.comment_pr = MagicMock(return_value=True)
+
+        recovered = agent._process_stale_locks()
+
+        assert recovered is True
+        agent.github.remove_pr_label.assert_called_once_with(
+            202, agent.STATUS_IMPLEMENTING
+        )
+        agent.github.add_pr_label.assert_called_once_with(
+            202, agent.STATUS_CHANGES_REQUESTED
+        )
+        agent.github.comment_pr.assert_called_once()
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_process_stale_lock_skips_recent_items(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Recent locks should not be recovered."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+            stale_lock_timeout_minutes=30,
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+        agent.github.list_issues = MagicMock(
+            return_value=[
+                Issue(
+                    number=303,
+                    title="Recent issue",
+                    body="spec",
+                    labels=[agent.STATUS_IMPLEMENTING],
+                )
+            ]
+        )
+        agent.github.list_prs = MagicMock(return_value=[])
+        agent.github.get_issue_comments = MagicMock(
+            return_value=[
+                {
+                    "body": "ACK:worker:worker-123:1",
+                    "created_at": "2100-01-01T00:00:00Z",
+                }
+            ]
+        )
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.comment_issue = MagicMock(return_value=True)
+
+        recovered = agent._process_stale_locks()
+
+        assert recovered is False
+        agent.github.remove_label.assert_not_called()
+        agent.github.add_label.assert_not_called()
+        agent.github.comment_issue.assert_not_called()
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
     def test_specification_unclear_detection(
         self, mock_config, mock_github, mock_lock, mock_llm, mock_git
     ):

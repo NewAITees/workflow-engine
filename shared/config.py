@@ -21,6 +21,7 @@ class AgentConfig:
     log_level: str = "INFO"
     auto_merge: bool = False  # Auto-merge approved PRs
     merge_method: str = "squash"  # "squash", "merge", or "rebase"
+    stale_lock_timeout_minutes: int = 30  # Recover stale implementing locks
 
     def __post_init__(self) -> None:
         if self.work_dir is None:
@@ -38,6 +39,8 @@ class AgentConfig:
             raise ValueError(
                 f"Invalid merge_method: {self.merge_method}. Must be 'squash', 'merge', or 'rebase'"
             )
+        if self.stale_lock_timeout_minutes <= 0:
+            raise ValueError("stale_lock_timeout_minutes must be a positive integer")
 
 
 @dataclass

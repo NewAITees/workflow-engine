@@ -26,6 +26,11 @@ def test_agent_config_invalid_merge_method() -> None:
         AgentConfig(repo="owner/repo", merge_method="fast-forward")
 
 
+def test_agent_config_invalid_stale_lock_timeout() -> None:
+    with pytest.raises(ValueError, match="stale_lock_timeout_minutes"):
+        AgentConfig(repo="owner/repo", stale_lock_timeout_minutes=0)
+
+
 def test_load_config_missing_file(tmp_path: Path) -> None:
     config = load_config(str(tmp_path / "missing.yml"))
 
@@ -44,6 +49,7 @@ repositories:
     llm_backend: claude
     auto_merge: true
     merge_method: rebase
+    stale_lock_timeout_minutes: 45
 """,
         encoding="utf-8",
     )
@@ -57,6 +63,7 @@ repositories:
     assert repo_config.llm_backend == "claude"
     assert repo_config.auto_merge is True
     assert repo_config.merge_method == "rebase"
+    assert repo_config.stale_lock_timeout_minutes == 45
 
 
 def test_get_agent_config_default(tmp_path: Path) -> None:
