@@ -300,6 +300,23 @@ class WorkerAgent:
                 yield work_git
                 return
         except Exception as e:
+            # Branch may already exist from a previous attempt.
+            if "already exists" in str(e):
+                logger.warning(
+                    f"[{self.agent_id}] Worktree branch already exists for issue #{issue_number}; "
+                    "retrying by reusing existing branch."
+                )
+                try:
+                    with self.workspace_manager.worktree(
+                        branch_name,
+                        worktree_id,
+                        create_branch=False,
+                        base_branch=default_branch,
+                    ) as work_git:
+                        yield work_git
+                        return
+                except Exception as retry_error:
+                    e = retry_error
             logger.warning(
                 f"[{self.agent_id}] Worktree setup failed for issue #{issue_number}: {e}. "
                 "Falling back to legacy workspace flow."
@@ -348,18 +365,32 @@ class WorkerAgent:
 
         try:
             with self._issue_workspace(issue.number, branch_name) as issue_git:
+                before_test_files = self._snapshot_test_files(issue_git.path)
+
                 # TDD Step 1: Generate tests first
                 logger.info(
                     f"[{self.agent_id}] Generating tests with {self.config.llm_backend}..."
                 )
                 test_result = self.llm.generate_tests(
-                    spec=issue.body,
-                    repo_context=f"Repository: {self.repo}",
+                    spec=(
+                        f"{issue.body}\n\n"
+                        "## Test File Requirement\n"
+                        f"Create/overwrite exactly one issue test file at "
+                        f"`tests/test_issue_{issue.number}.py`."
+                    ),
+                    repo_context=(
+                        f"Repository: {self.repo}\n"
+                        f"Required test path: tests/test_issue_{issue.number}.py"
+                    ),
                     work_dir=issue_git.path,
                 )
 
                 if not test_result.success:
                     raise RuntimeError(f"Test generation failed: {test_result.error}")
+
+                self._ensure_issue_test_file(
+                    issue.number, issue_git.path, before_test_files
+                )
 
                 # Commit tests
                 logger.info(f"[{self.agent_id}] Committing tests...")
@@ -460,7 +491,7 @@ class WorkerAgent:
 
                 # Push branch
                 logger.info(f"[{self.agent_id}] Pushing to remote...")
-                push_result = issue_git.push(branch_name)
+                push_result = issue_git.push(branch_name, force=True)
                 if not push_result.success:
                     raise RuntimeError(f"Push failed: {push_result.error}")
 
@@ -1175,12 +1206,13 @@ Please analyze and fix the CI failures.
         Returns:
             (success, output): 成功フラグとテスト出力
         """
-        test_file = f"tests/test_issue_{issue_number}.py"
         repo_path = git_path or self.git.path
-        test_path = repo_path / test_file
+        test_path = self._locate_issue_test_file(issue_number, repo_path)
 
-        if not test_path.exists():
-            return False, f"Test file not found: {test_file}"
+        if test_path is None:
+            return False, f"Test file not found: tests/test_issue_{issue_number}.py"
+
+        test_file = str(test_path.relative_to(repo_path))
 
         logger.info(f"[{self.agent_id}] Running tests: {test_file}")
 
@@ -1213,6 +1245,64 @@ Please analyze and fix the CI failures.
             error_msg = f"Test execution error: {str(e)}"
             logger.error(f"[{self.agent_id}] {error_msg}")
             return False, error_msg
+
+    def _snapshot_test_files(self, repo_path: Path) -> set[Path]:
+        """Collect current test files under tests/."""
+        tests_dir = repo_path / "tests"
+        if not tests_dir.exists():
+            return set()
+        return {path for path in tests_dir.rglob("test*.py") if path.is_file()}
+
+    def _ensure_issue_test_file(
+        self, issue_number: int, repo_path: Path, before_files: set[Path]
+    ) -> None:
+        """Ensure generated issue test exists at tests/test_issue_<n>.py."""
+        expected = repo_path / "tests" / f"test_issue_{issue_number}.py"
+        if expected.exists():
+            return
+
+        after_files = self._snapshot_test_files(repo_path)
+        new_files = sorted(
+            [path for path in after_files if path not in before_files],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+
+        if len(new_files) == 1:
+            expected.parent.mkdir(parents=True, exist_ok=True)
+            source = new_files[0]
+            logger.warning(
+                f"[{self.agent_id}] Generated test file {source.relative_to(repo_path)} "
+                f"does not match required path; moving to tests/test_issue_{issue_number}.py"
+            )
+            source.replace(expected)
+            return
+
+        logger.warning(
+            f"[{self.agent_id}] Could not normalize generated tests to "
+            f"tests/test_issue_{issue_number}.py automatically."
+        )
+
+    def _locate_issue_test_file(
+        self, issue_number: int, repo_path: Path
+    ) -> Path | None:
+        """Locate the issue test file, preferring the canonical filename."""
+        expected = repo_path / "tests" / f"test_issue_{issue_number}.py"
+        if expected.exists():
+            return expected
+
+        tests_dir = repo_path / "tests"
+        if not tests_dir.exists():
+            return None
+
+        candidates = [
+            path
+            for path in tests_dir.rglob("test*.py")
+            if path.is_file() and str(issue_number) in path.stem
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
 
     def _wait_for_ci(
         self, pr_number: int, timeout: int | None = None

@@ -169,6 +169,79 @@ class TestWorkerAgent:
     @patch("shared.lock.LockManager")
     @patch("shared.github_client.GitHubClient")
     @patch("shared.config.get_agent_config")
+    def test_run_tests_fallback_uses_single_issue_number_candidate(
+        self,
+        mock_config,
+        mock_github,
+        mock_lock,
+        mock_llm,
+        mock_git,
+        mock_run,
+        tmp_path,
+    ):
+        """When canonical file is missing, use a single matching test file."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        repo_path = tmp_path / "repo"
+        tests_dir = repo_path / "tests"
+        tests_dir.mkdir(parents=True)
+        candidate = tests_dir / "test_stale_lock_issue_123.py"
+        candidate.write_text("def test_x():\n    assert True\n")
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = MagicMock()
+        agent.git.path = repo_path
+
+        success, _ = agent._run_tests(123)
+
+        assert success is True
+        run_args = mock_run.call_args[0][0]
+        assert "tests/test_stale_lock_issue_123.py" in run_args
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_ensure_issue_test_file_moves_single_generated_file(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git, tmp_path
+    ):
+        """Normalize a single generated test file to canonical issue test path."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        repo_path = tmp_path / "repo"
+        tests_dir = repo_path / "tests"
+        tests_dir.mkdir(parents=True)
+
+        agent = WorkerAgent("owner/repo")
+        before = agent._snapshot_test_files(repo_path)
+
+        generated = tests_dir / "test_stale_lock.py"
+        generated.write_text("def test_x():\n    assert True\n")
+
+        agent._ensure_issue_test_file(7, repo_path, before)
+
+        assert not generated.exists()
+        assert (tests_dir / "test_issue_7.py").exists()
+
+    @patch("subprocess.run")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
     def test_run_tests_timeout(
         self, mock_config, mock_github, mock_lock, mock_llm, mock_git, mock_run
     ):
@@ -746,6 +819,8 @@ class TestWorkerAgent:
             "ci-failed" in str(call)
             for call in agent.github.add_pr_label.call_args_list
         )
+        # Issue implementation push should use force to avoid branch divergence failures
+        mock_git_instance.push.assert_any_call("auto/issue-123", force=True)
         # Should comment local TDD result on PR
         assert any(
             "Local TDD validation passed" in str(call)

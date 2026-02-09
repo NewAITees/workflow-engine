@@ -140,7 +140,7 @@ class GitOperations:
         """Push branch to origin."""
         args = ["push", "-u", "origin", branch_name]
         if force:
-            args.insert(1, "--force")
+            args.insert(1, "--force-with-lease")
         return self._run(args)
 
     def get_diff(self, base_branch: str | None = None) -> str:
