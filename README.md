@@ -189,6 +189,29 @@ repositories:
 
 ## 使い方
 
+### 最短運用フロー（あなたがやること）
+
+はい、その理解で合っています。基本は「Plannerに依頼してIssue化」してから、Worker/Reviewerに回します。
+
+1. Plannerに要望を渡してIssue化する
+```bash
+uv run planner-agent/main.py owner/repo --story "これをIssue化して: ユーザー検索機能を追加"
+```
+2. Workerを起動して `status:ready` Issue を実装させる
+```bash
+uv run worker-agent/main.py owner/repo --verbose
+```
+3. Reviewerを起動して `status:reviewing` PR をレビューさせる
+```bash
+uv run reviewer-agent/main.py owner/repo --verbose
+```
+4. Plannerのエスカレーションループも回す（推奨）
+```bash
+uv run planner-agent/main.py owner/repo --daemon --verbose
+```
+
+運用上は3ターミナルで `planner --daemon` / `worker` / `reviewer` を常駐させ、あなたは新規要望を `planner --story` で投入する形が最もシンプルです。
+
 ### Planner Agent（インタラクティブ）
 
 ```bash
