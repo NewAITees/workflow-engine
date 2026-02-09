@@ -653,7 +653,15 @@ Please analyze and fix the CI failures.
             )
 
             failure_reason = str(e)
-            if self._is_specification_unclear(failure_reason, issue.body):
+            if "Tests failed after" in failure_reason:
+                self._comment_worker_escalation(
+                    issue.number,
+                    "test-retry-limit",
+                    "Test fix loop exhausted maximum retries. Please review test design and specification.",
+                )
+                self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                self.github.add_label(issue.number, self.STATUS_NEEDS_CLARIFICATION)
+            elif self._is_specification_unclear(failure_reason, issue.body):
                 self.lock.mark_needs_clarification(
                     issue.number,
                     self.STATUS_IMPLEMENTING,
@@ -672,6 +680,11 @@ Please analyze and fix the CI failures.
                     f"⚠️ **Implementation failed - Specification clarification needed**\n\n"
                     f"{feedback}\n\n"
                     f"@Planner: Please review and clarify the specification.",
+                )
+                self._comment_worker_escalation(
+                    issue.number,
+                    "spec-clarification-needed",
+                    "Specification is ambiguous or incomplete for implementation.",
                 )
 
                 self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
@@ -752,6 +765,15 @@ Once clarified, please update the issue and change label from `status:needs-clar
 
         return feedback
 
+    def _comment_worker_escalation(
+        self, issue_number: int, reason: str, details: str
+    ) -> None:
+        """Post a normalized worker escalation marker for Planner loop pickup."""
+        self.github.comment_issue(
+            issue_number,
+            f"ESCALATION:worker\n\nReason: {reason}\n\n{details}",
+        )
+
     def _process_changes_requested_prs(self) -> None:
         """Find and retry PRs with changes requested."""
         prs = self.github.list_prs(labels=[self.STATUS_CHANGES_REQUESTED])
@@ -807,6 +829,11 @@ Once clarified, please update the issue and change label from `status:needs-clar
                 f"PR #{pr.number} could not pass review.\n\n"
                 f"**Action needed**: Please review the specification and provide more details or clarification.\n\n"
                 f"Review feedback:\n{self._get_latest_review_feedback(pr.number)}",
+            )
+            self._comment_worker_escalation(
+                issue_number,
+                "review-retry-limit",
+                f"PR #{pr.number} exceeded retry limit ({self.MAX_RETRIES}).",
             )
             # Remove changes-requested label and add failed
             self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
@@ -1100,6 +1127,11 @@ Please analyze and fix the CI failures.
                     f"⚠️ **Auto-retry failed after {self.MAX_RETRIES} attempts**\n\n"
                     f"PR #{pr.number} could not be stabilized due to repeated retry errors.\n\n"
                     "Please review the specification and/or implementation strategy.",
+                )
+                self._comment_worker_escalation(
+                    issue_number,
+                    "review-retry-error-limit",
+                    f"PR #{pr.number} retry flow failed repeatedly and exhausted retry budget.",
                 )
                 self.github.remove_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
                 self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)

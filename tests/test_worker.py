@@ -1,6 +1,7 @@
 """Tests for Worker Agent."""
 
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1079,9 +1080,73 @@ class TestWorkerAgent:
 
         assert result is False
         agent.lock.mark_needs_clarification.assert_called_once()
-        agent.github.comment_issue.assert_called_once()
+        assert agent.github.comment_issue.call_count >= 2
         agent.github.add_label.assert_called_once_with(
             issue.number, agent.STATUS_NEEDS_CLARIFICATION
+        )
+        assert any(
+            "ESCALATION:worker" in str(call)
+            for call in agent.github.comment_issue.call_args_list
+        )
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_test_retry_limit_triggers_worker_escalation(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """When test retries are exhausted, worker posts ESCALATION marker."""
+        from shared.llm_client import LLMResult
+
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+        issue_git = MagicMock()
+        issue_git.path = Path("/tmp/test/repo")
+        issue_git.commit.return_value = MagicMock(success=True, output="")
+        issue_git.push.return_value = MagicMock(success=True, output="")
+
+        agent._issue_workspace = MagicMock(return_value=nullcontext(issue_git))
+        agent._run_tests = MagicMock(
+            side_effect=[
+                (False, "fail 1"),
+                (False, "fail 2"),
+                (False, "fail 3"),
+            ]
+        )
+        agent.llm.generate_tests = MagicMock(
+            return_value=LLMResult(success=True, output="tests generated")
+        )
+        agent.llm.generate_implementation = MagicMock(
+            return_value=LLMResult(success=True, output="impl")
+        )
+        agent.lock.try_lock_issue = MagicMock(return_value=MagicMock(success=True))
+        agent.lock.mark_failed = MagicMock()
+        agent.lock.mark_needs_clarification = MagicMock()
+        agent.git.cleanup_branch = MagicMock()
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+
+        issue = Issue(
+            number=88, title="Retry issue", body="Long enough spec " * 20, labels=[]
+        )
+        result = agent._try_process_issue(issue)
+
+        assert result is False
+        agent.github.add_label.assert_any_call(
+            issue.number, agent.STATUS_NEEDS_CLARIFICATION
+        )
+        assert any(
+            "ESCALATION:worker" in str(call)
+            for call in agent.github.comment_issue.call_args_list
         )
 
     @patch("shared.git_operations.GitOperations")
