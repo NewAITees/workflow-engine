@@ -38,7 +38,12 @@ class WorkspaceManager:
 
     @contextmanager
     def worktree(
-        self, branch: str, agent_id: str
+        self,
+        branch: str,
+        agent_id: str,
+        *,
+        create_branch: bool = False,
+        base_branch: str = "main",
     ) -> Generator[GitOperations, None, None]:
         """
         Context manager that provides an isolated worktree.
@@ -67,7 +72,12 @@ class WorkspaceManager:
             # If remove failed or it wasn't a worktree but a dir, force remove dir?
             # Git worktree remove should handle cleaning the entry.
 
-        result = self.main_git.worktree_add(worktree_path, branch)
+        result = self.main_git.worktree_add(
+            worktree_path,
+            branch,
+            create_branch=create_branch,
+            base_branch=base_branch,
+        )
         if not result.success:
             # Try pruning and retry - sometimes metadata gets stale
             logger.warning(
@@ -77,7 +87,12 @@ class WorkspaceManager:
 
             # If the branch is already checked out, we might need to detach or force.
             # But for now, let's assume standard behavior.
-            result = self.main_git.worktree_add(worktree_path, branch)
+            result = self.main_git.worktree_add(
+                worktree_path,
+                branch,
+                create_branch=create_branch,
+                base_branch=base_branch,
+            )
 
             if not result.success:
                 raise RuntimeError(f"Failed to create worktree: {result.error}")

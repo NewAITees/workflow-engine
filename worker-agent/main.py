@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 # Add parent directory to path for shared imports
@@ -22,6 +24,7 @@ from shared.git_operations import GitOperations
 from shared.github_client import GitHubClient, Issue, PullRequest
 from shared.llm_client import LLMClient
 from shared.lock import LockManager
+from shared.workspace import WorkspaceManager
 
 # Configure logging
 logging.basicConfig(
@@ -81,6 +84,7 @@ class WorkerAgent:
         )
         self.llm = LLMClient(self.config)
         self.git = GitOperations(repo, Path(self.config.work_dir))
+        self.workspace_manager = WorkspaceManager(repo, self.git.path)
 
         logger.info(f"Worker Agent initialized for {repo}")
         logger.info(f"Agent ID: {self.agent_id}")
@@ -136,6 +140,51 @@ class WorkerAgent:
             else:
                 logger.debug(f"Skipped issue #{issue.number}")
 
+    @contextmanager
+    def _issue_workspace(
+        self, issue_number: int, branch_name: str
+    ) -> Generator[GitOperations, None, None]:
+        """Provide a per-issue worktree and fall back to legacy workspace if needed."""
+        if not isinstance(self.git, GitOperations):
+            clone_result = self.git.clone_or_pull()
+            if not clone_result.success:
+                raise RuntimeError(f"Failed to prepare workspace: {clone_result.error}")
+
+            branch_result = self.git.create_branch(branch_name)
+            if not branch_result.success:
+                raise RuntimeError(f"Failed to create branch: {branch_result.error}")
+
+            yield self.git
+            return
+
+        default_branch = self.github.get_default_branch()
+        worktree_id = f"{self.agent_id}-issue-{issue_number}"
+
+        try:
+            with self.workspace_manager.worktree(
+                branch_name,
+                worktree_id,
+                create_branch=True,
+                base_branch=default_branch,
+            ) as work_git:
+                yield work_git
+                return
+        except Exception as e:
+            logger.warning(
+                f"[{self.agent_id}] Worktree setup failed for issue #{issue_number}: {e}. "
+                "Falling back to legacy workspace flow."
+            )
+
+        clone_result = self.git.clone_or_pull()
+        if not clone_result.success:
+            raise RuntimeError(f"Failed to prepare workspace: {clone_result.error}")
+
+        branch_result = self.git.create_branch(branch_name)
+        if not branch_result.success:
+            raise RuntimeError(f"Failed to create branch: {branch_result.error}")
+
+        yield self.git
+
     def _try_process_issue(self, issue: Issue) -> bool:
         """
         Try to process a single issue with TDD flow.
@@ -165,135 +214,129 @@ class WorkerAgent:
             logger.debug(f"Could not lock issue #{issue.number}: {lock_result.error}")
             return False
 
+        branch_name = f"auto/issue-{issue.number}"
+
         try:
-            # Clone/update repository
-            logger.info(f"[{self.agent_id}] Preparing workspace...")
-            clone_result = self.git.clone_or_pull()
-            if not clone_result.success:
-                raise RuntimeError(f"Failed to prepare workspace: {clone_result.error}")
-
-            # Create feature branch
-            branch_name = f"auto/issue-{issue.number}"
-            logger.info(f"[{self.agent_id}] Creating branch: {branch_name}")
-
-            branch_result = self.git.create_branch(branch_name)
-            if not branch_result.success:
-                raise RuntimeError(f"Failed to create branch: {branch_result.error}")
-
-            # TDD Step 1: Generate tests first
-            logger.info(
-                f"[{self.agent_id}] Generating tests with {self.config.llm_backend}..."
-            )
-            test_result = self.llm.generate_tests(
-                spec=issue.body,
-                repo_context=f"Repository: {self.repo}",
-                work_dir=self.git.path,
-            )
-
-            if not test_result.success:
-                raise RuntimeError(f"Test generation failed: {test_result.error}")
-
-            # Commit tests
-            logger.info(f"[{self.agent_id}] Committing tests...")
-            test_commit_msg = f"test: add tests for #{issue.number}\n\n{issue.title}"
-            test_commit_result = self.git.commit(test_commit_msg)
-
-            if not test_commit_result.success:
-                raise RuntimeError(f"Test commit failed: {test_commit_result.error}")
-
-            # TDD Step 2-4: Implementation with test retry loop
-            test_retry_count = 0
-            test_failure_output = ""
-            test_passed = False
-
-            while test_retry_count < self.MAX_RETRIES:
+            with self._issue_workspace(issue.number, branch_name) as issue_git:
+                # TDD Step 1: Generate tests first
                 logger.info(
-                    f"[{self.agent_id}] Generating implementation "
-                    f"(attempt {test_retry_count + 1}/{self.MAX_RETRIES})..."
+                    f"[{self.agent_id}] Generating tests with {self.config.llm_backend}..."
+                )
+                test_result = self.llm.generate_tests(
+                    spec=issue.body,
+                    repo_context=f"Repository: {self.repo}",
+                    work_dir=issue_git.path,
                 )
 
-                # Prepare spec with test feedback if retrying
-                impl_spec = issue.body
-                if test_retry_count > 0:
-                    impl_spec += (
-                        f"\n\n## Previous Test Failure (Attempt {test_retry_count})\n"
-                        f"Please fix the implementation to pass the tests.\n\n"
-                        f"```\n{test_failure_output[:2000]}\n```"
-                    )
+                if not test_result.success:
+                    raise RuntimeError(f"Test generation failed: {test_result.error}")
 
-                # Generate implementation
-                gen_result = self.llm.generate_implementation(
-                    spec=impl_spec,
-                    repo_context=f"Repository: {self.repo}\nTDD attempt: {test_retry_count + 1}/{self.MAX_RETRIES}",
-                    work_dir=self.git.path,
+                # Commit tests
+                logger.info(f"[{self.agent_id}] Committing tests...")
+                test_commit_msg = (
+                    f"test: add tests for #{issue.number}\n\n{issue.title}"
                 )
+                test_commit_result = issue_git.commit(test_commit_msg)
 
-                if not gen_result.success:
-                    raise RuntimeError(f"Implementation failed: {gen_result.error}")
-
-                # Commit implementation
-                logger.info(f"[{self.agent_id}] Committing implementation...")
-                impl_commit_msg = f"feat: implement #{issue.number} (attempt {test_retry_count + 1})\n\n{issue.title}"
-                impl_commit_result = self.git.commit(impl_commit_msg)
-
-                if not impl_commit_result.success:
+                if not test_commit_result.success:
                     raise RuntimeError(
-                        f"Implementation commit failed: {impl_commit_result.error}"
+                        f"Test commit failed: {test_commit_result.error}"
                     )
 
-                # Transition to testing status
-                self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
-                self.github.add_label(issue.number, self.STATUS_TESTING)
+                # TDD Step 2-4: Implementation with test retry loop
+                test_failure_output = ""
+                test_passed = False
 
-                # Run tests
-                logger.info(f"[{self.agent_id}] Running tests...")
-                test_passed, test_output = self._run_tests(issue.number)
-
-                if test_passed:
+                while test_retry_count < self.MAX_RETRIES:
                     logger.info(
-                        f"[{self.agent_id}] Tests passed on attempt {test_retry_count + 1}"
-                    )
-                    break
-
-                # Tests failed - record and retry
-                test_retry_count += 1
-                test_failure_output = test_output
-
-                logger.warning(
-                    f"[{self.agent_id}] Tests failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
-                )
-
-                # Comment on issue about test failure
-                self.github.comment_issue(
-                    issue.number,
-                    f"⚠️ **Test failed (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
-                    f"Retrying implementation with test feedback...\n\n"
-                    f"<details>\n<summary>Test output</summary>\n\n"
-                    f"```\n{test_output[:2000]}\n```\n\n</details>",
-                )
-
-                if test_retry_count >= self.MAX_RETRIES:
-                    # Max retries exceeded
-                    raise RuntimeError(
-                        f"Tests failed after {self.MAX_RETRIES} attempts:\n{test_output[:500]}"
+                        f"[{self.agent_id}] Generating implementation "
+                        f"(attempt {test_retry_count + 1}/{self.MAX_RETRIES})..."
                     )
 
-                # Transition back to implementing for retry
+                    # Prepare spec with test feedback if retrying
+                    impl_spec = issue.body
+                    if test_retry_count > 0:
+                        impl_spec += (
+                            f"\n\n## Previous Test Failure (Attempt {test_retry_count})\n"
+                            f"Please fix the implementation to pass the tests.\n\n"
+                            f"```\n{test_failure_output[:2000]}\n```"
+                        )
+
+                    # Generate implementation
+                    gen_result = self.llm.generate_implementation(
+                        spec=impl_spec,
+                        repo_context=f"Repository: {self.repo}\nTDD attempt: {test_retry_count + 1}/{self.MAX_RETRIES}",
+                        work_dir=issue_git.path,
+                    )
+
+                    if not gen_result.success:
+                        raise RuntimeError(f"Implementation failed: {gen_result.error}")
+
+                    # Commit implementation
+                    logger.info(f"[{self.agent_id}] Committing implementation...")
+                    impl_commit_msg = f"feat: implement #{issue.number} (attempt {test_retry_count + 1})\n\n{issue.title}"
+                    impl_commit_result = issue_git.commit(impl_commit_msg)
+
+                    if not impl_commit_result.success:
+                        raise RuntimeError(
+                            f"Implementation commit failed: {impl_commit_result.error}"
+                        )
+
+                    # Transition to testing status
+                    self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                    self.github.add_label(issue.number, self.STATUS_TESTING)
+
+                    # Run tests
+                    logger.info(f"[{self.agent_id}] Running tests...")
+                    test_passed, test_output = self._run_tests(
+                        issue.number, git_path=issue_git.path
+                    )
+
+                    if test_passed:
+                        logger.info(
+                            f"[{self.agent_id}] Tests passed on attempt {test_retry_count + 1}"
+                        )
+                        break
+
+                    # Tests failed - record and retry
+                    test_retry_count += 1
+                    test_failure_output = test_output
+
+                    logger.warning(
+                        f"[{self.agent_id}] Tests failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
+                    )
+
+                    # Comment on issue about test failure
+                    self.github.comment_issue(
+                        issue.number,
+                        f"⚠️ **Test failed (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
+                        f"Retrying implementation with test feedback...\n\n"
+                        f"<details>\n<summary>Test output</summary>\n\n"
+                        f"```\n{test_output[:2000]}\n```\n\n</details>",
+                    )
+
+                    if test_retry_count >= self.MAX_RETRIES:
+                        # Max retries exceeded
+                        raise RuntimeError(
+                            f"Tests failed after {self.MAX_RETRIES} attempts:\n{test_output[:500]}"
+                        )
+
+                    # Transition back to implementing for retry
+                    self.github.remove_label(issue.number, self.STATUS_TESTING)
+                    self.github.add_label(issue.number, self.STATUS_IMPLEMENTING)
+
+                # Tests passed! Transition to reviewing
                 self.github.remove_label(issue.number, self.STATUS_TESTING)
-                self.github.add_label(issue.number, self.STATUS_IMPLEMENTING)
 
-            # Tests passed! Transition to reviewing
-            self.github.remove_label(issue.number, self.STATUS_TESTING)
+                # Push branch
+                logger.info(f"[{self.agent_id}] Pushing to remote...")
+                push_result = issue_git.push(branch_name)
+                if not push_result.success:
+                    raise RuntimeError(f"Push failed: {push_result.error}")
 
-            # Push branch
-            logger.info(f"[{self.agent_id}] Pushing to remote...")
-            push_result = self.git.push(branch_name)
-            if not push_result.success:
-                raise RuntimeError(f"Push failed: {push_result.error}")
-
-            # Create pull request
-            logger.info(f"[{self.agent_id}] Creating pull request...")
-            pr_body = f"""## Summary
+                # Create pull request
+                logger.info(f"[{self.agent_id}] Creating pull request...")
+                pr_body = f"""## Summary
 Auto-generated implementation for #{issue.number} using TDD approach.
 
 ## Original Issue
@@ -313,56 +356,56 @@ Closes #{issue.number}
 🤖 Auto-generated by Workflow Engine Worker Agent
 """
 
-            # Get default branch for PR base
-            default_branch = self.github.get_default_branch()
+                # Get default branch for PR base
+                default_branch = self.github.get_default_branch()
 
-            pr_url = self.github.create_pr(
-                title=f"Auto: {issue.title}",
-                body=pr_body,
-                head=branch_name,
-                base=default_branch,
-                labels=[self.STATUS_REVIEWING],
-            )
-
-            if not pr_url:
-                raise RuntimeError("Failed to create pull request")
-
-            logger.info(f"[{self.agent_id}] Pull request created: {pr_url}")
-
-            # Extract PR number from URL
-            pr_number = int(pr_url.split("/")[-1])
-
-            # Wait for CI and handle failures with retry loop
-            logger.info(f"[{self.agent_id}] Waiting for CI to complete...")
-            ci_passed, ci_status = self._wait_for_ci(
-                pr_number, timeout=self.CI_WAIT_TIMEOUT
-            )
-
-            ci_retry_count = 0
-            while (
-                not ci_passed
-                and ci_status == "failure"
-                and ci_retry_count < self.MAX_CI_RETRIES
-            ):
-                ci_retry_count += 1
-                logger.warning(
-                    f"[{self.agent_id}] CI failed (attempt {ci_retry_count}/{self.MAX_CI_RETRIES})"
+                pr_url = self.github.create_pr(
+                    title=f"Auto: {issue.title}",
+                    body=pr_body,
+                    head=branch_name,
+                    base=default_branch,
+                    labels=[self.STATUS_REVIEWING],
                 )
 
-                # Get CI failure logs
-                ci_logs = self._get_ci_failure_logs(pr_number)
+                if not pr_url:
+                    raise RuntimeError("Failed to create pull request")
 
-                # Comment about CI failure
-                self.github.comment_pr(
-                    pr_number,
-                    f"⚠️ **CI failed (attempt {ci_retry_count}/{self.MAX_CI_RETRIES})**\n\n"
-                    f"Analyzing failures and attempting automatic fix...\n\n"
-                    f"<details>\n<summary>CI failure details</summary>\n\n"
-                    f"{ci_logs[:2000]}\n\n</details>",
+                logger.info(f"[{self.agent_id}] Pull request created: {pr_url}")
+
+                # Extract PR number from URL
+                pr_number = int(pr_url.split("/")[-1])
+
+                # Wait for CI and handle failures with retry loop
+                logger.info(f"[{self.agent_id}] Waiting for CI to complete...")
+                ci_passed, ci_status = self._wait_for_ci(
+                    pr_number, timeout=self.CI_WAIT_TIMEOUT
                 )
 
-                # Ask LLM to fix CI failures
-                fix_spec = f"""{issue.body}
+                ci_retry_count = 0
+                while (
+                    not ci_passed
+                    and ci_status == "failure"
+                    and ci_retry_count < self.MAX_CI_RETRIES
+                ):
+                    ci_retry_count += 1
+                    logger.warning(
+                        f"[{self.agent_id}] CI failed (attempt {ci_retry_count}/{self.MAX_CI_RETRIES})"
+                    )
+
+                    # Get CI failure logs
+                    ci_logs = self._get_ci_failure_logs(pr_number)
+
+                    # Comment about CI failure
+                    self.github.comment_pr(
+                        pr_number,
+                        f"⚠️ **CI failed (attempt {ci_retry_count}/{self.MAX_CI_RETRIES})**\n\n"
+                        f"Analyzing failures and attempting automatic fix...\n\n"
+                        f"<details>\n<summary>CI failure details</summary>\n\n"
+                        f"{ci_logs[:2000]}\n\n</details>",
+                    )
+
+                    # Ask LLM to fix CI failures
+                    fix_spec = f"""{issue.body}
 
 ## CI Failure (Attempt {ci_retry_count})
 The implementation passed local tests but CI checks failed.
@@ -371,106 +414,108 @@ Please analyze and fix the CI failures.
 {ci_logs}
 """
 
-                logger.info(
-                    f"[{self.agent_id}] Asking LLM to fix CI failures (attempt {ci_retry_count})..."
-                )
-                fix_result = self.llm.generate_implementation(
-                    spec=fix_spec,
-                    repo_context=f"Repository: {self.repo}\nCI fix attempt: {ci_retry_count}/{self.MAX_CI_RETRIES}",
-                    work_dir=self.git.path,
-                )
-
-                if not fix_result.success:
-                    logger.error(
-                        f"[{self.agent_id}] CI fix generation failed: {fix_result.error}"
+                    logger.info(
+                        f"[{self.agent_id}] Asking LLM to fix CI failures (attempt {ci_retry_count})..."
                     )
-                    break
-
-                # Commit CI fix
-                fix_commit_msg = f"fix: address CI failures for #{issue.number} (attempt {ci_retry_count})\n\n{ci_logs[:200]}"
-                fix_commit_result = self.git.commit(fix_commit_msg)
-
-                if not fix_commit_result.success:
-                    logger.error(
-                        f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
-                    )
-                    break
-
-                # Push fix
-                push_result = self.git.push(branch_name)
-                if not push_result.success:
-                    logger.error(
-                        f"[{self.agent_id}] CI fix push failed: {push_result.error}"
-                    )
-                    break
-
-                # Wait for CI again
-                logger.info(f"[{self.agent_id}] Waiting for CI after fix...")
-                ci_passed, ci_status = self._wait_for_ci(
-                    pr_number, timeout=self.CI_WAIT_TIMEOUT
-                )
-
-            # Check final CI status
-            if not ci_passed:
-                if ci_status == "pending":
-                    # CI still pending after timeout
-                    logger.warning(
-                        f"[{self.agent_id}] CI still pending after timeout, marking for manual review"
-                    )
-                    self.github.comment_pr(
-                        pr_number,
-                        "⏱️ **CI checks are taking longer than expected**\n\n"
-                        "The PR is ready for manual review while CI completes.",
-                    )
-                elif ci_status == "failure":
-                    # CI failed after all retries
-                    logger.error(
-                        f"[{self.agent_id}] CI failed after {ci_retry_count} fix attempts"
+                    fix_result = self.llm.generate_implementation(
+                        spec=fix_spec,
+                        repo_context=f"Repository: {self.repo}\nCI fix attempt: {ci_retry_count}/{self.MAX_CI_RETRIES}",
+                        work_dir=issue_git.path,
                     )
 
-                    # Mark PR with ci-failed status
-                    self.github.add_pr_label(pr_number, self.STATUS_CI_FAILED)
-                    self.github.remove_pr_label(pr_number, self.STATUS_REVIEWING)
+                    if not fix_result.success:
+                        logger.error(
+                            f"[{self.agent_id}] CI fix generation failed: {fix_result.error}"
+                        )
+                        break
 
-                    self.github.comment_pr(
-                        pr_number,
-                        f"❌ **CI checks failed after {ci_retry_count} automatic fix attempts**\n\n"
-                        f"Manual intervention required. Please review the CI logs and fix the issues.\n\n"
-                        f"The PR has been marked with `{self.STATUS_CI_FAILED}` label.",
+                    # Commit CI fix
+                    fix_commit_msg = f"fix: address CI failures for #{issue.number} (attempt {ci_retry_count})\n\n{ci_logs[:200]}"
+                    fix_commit_result = issue_git.commit(fix_commit_msg)
+
+                    if not fix_commit_result.success:
+                        logger.error(
+                            f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
+                        )
+                        break
+
+                    # Push fix
+                    push_result = issue_git.push(branch_name)
+                    if not push_result.success:
+                        logger.error(
+                            f"[{self.agent_id}] CI fix push failed: {push_result.error}"
+                        )
+                        break
+
+                    # Wait for CI again
+                    logger.info(f"[{self.agent_id}] Waiting for CI after fix...")
+                    ci_passed, ci_status = self._wait_for_ci(
+                        pr_number, timeout=self.CI_WAIT_TIMEOUT
                     )
 
-                    # Also comment on issue
-                    self.github.comment_issue(
-                        issue.number,
-                        f"⚠️ **CI checks failed**\n\n"
-                        f"Pull Request: {pr_url}\n\n"
-                        f"Attempted {ci_retry_count} automatic fixes but CI still failing.\n"
-                        f"Manual review needed.",
-                    )
+                # Check final CI status
+                if not ci_passed:
+                    if ci_status == "pending":
+                        # CI still pending after timeout
+                        logger.warning(
+                            f"[{self.agent_id}] CI still pending after timeout, marking for manual review"
+                        )
+                        self.github.comment_pr(
+                            pr_number,
+                            "⏱️ **CI checks are taking longer than expected**\n\n"
+                            "The PR is ready for manual review while CI completes.",
+                        )
+                    elif ci_status == "failure":
+                        # CI failed after all retries
+                        logger.error(
+                            f"[{self.agent_id}] CI failed after {ci_retry_count} fix attempts"
+                        )
 
-                    return False
-            else:
-                logger.info(f"[{self.agent_id}] CI passed!")
+                        # Mark PR with ci-failed status
+                        self.github.add_pr_label(pr_number, self.STATUS_CI_FAILED)
+                        self.github.remove_pr_label(pr_number, self.STATUS_REVIEWING)
+
+                        self.github.comment_pr(
+                            pr_number,
+                            f"❌ **CI checks failed after {ci_retry_count} automatic fix attempts**\n\n"
+                            f"Manual intervention required. Please review the CI logs and fix the issues.\n\n"
+                            f"The PR has been marked with `{self.STATUS_CI_FAILED}` label.",
+                        )
+
+                        # Also comment on issue
+                        self.github.comment_issue(
+                            issue.number,
+                            f"⚠️ **CI checks failed**\n\n"
+                            f"Pull Request: {pr_url}\n\n"
+                            f"Attempted {ci_retry_count} automatic fixes but CI still failing.\n"
+                            f"Manual review needed.",
+                        )
+
+                        return False
+                else:
+                    logger.info(f"[{self.agent_id}] CI passed!")
+                    if ci_retry_count > 0:
+                        self.github.comment_pr(
+                            pr_number,
+                            f"✅ **CI now passing after {ci_retry_count} automatic fix(es)!**",
+                        )
+
+                # Comment on issue about successful completion
+                ci_info = ""
                 if ci_retry_count > 0:
-                    self.github.comment_pr(
-                        pr_number,
-                        f"✅ **CI now passing after {ci_retry_count} automatic fix(es)!**",
+                    ci_info = (
+                        f"\n- CI fixes: {ci_retry_count} automatic fix(es) applied"
                     )
 
-            # Comment on issue about successful completion
-            ci_info = ""
-            if ci_retry_count > 0:
-                ci_info = f"\n- CI fixes: {ci_retry_count} automatic fix(es) applied"
+                self.github.comment_issue(
+                    issue.number,
+                    f"✅ **Implementation complete with TDD!**\n\n"
+                    f"- Tests generated and passed\n"
+                    f"- Test attempts: {test_retry_count + 1}/{self.MAX_RETRIES}{ci_info}\n\n"
+                    f"Pull Request: {pr_url}",
+                )
 
-            self.github.comment_issue(
-                issue.number,
-                f"✅ **Implementation complete with TDD!**\n\n"
-                f"- Tests generated and passed\n"
-                f"- Test attempts: {test_retry_count + 1}/{self.MAX_RETRIES}{ci_info}\n\n"
-                f"Pull Request: {pr_url}",
-            )
-
-            return True
+                return True
 
         except Exception as e:
             logger.error(
@@ -944,7 +989,9 @@ Please analyze and fix the CI failures.
 
             return False
 
-    def _run_tests(self, issue_number: int) -> tuple[bool, str]:
+    def _run_tests(
+        self, issue_number: int, git_path: Path | None = None
+    ) -> tuple[bool, str]:
         """
         Run pytest for the specific issue's tests.
 
@@ -955,7 +1002,8 @@ Please analyze and fix the CI failures.
             (success, output): 成功フラグとテスト出力
         """
         test_file = f"tests/test_issue_{issue_number}.py"
-        test_path = self.git.path / test_file
+        repo_path = git_path or self.git.path
+        test_path = repo_path / test_file
 
         if not test_path.exists():
             return False, f"Test file not found: {test_file}"
@@ -965,7 +1013,7 @@ Please analyze and fix the CI failures.
         try:
             result = subprocess.run(
                 ["pytest", test_file, "-v", "--tb=short"],
-                cwd=self.git.path,
+                cwd=repo_path,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5分タイムアウト

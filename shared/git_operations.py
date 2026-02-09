@@ -163,10 +163,20 @@ class GitOperations:
         self._run(["branch", "-D", branch_name], check=False)
         self._run(["push", "origin", "--delete", branch_name], check=False)
 
-    def worktree_add(self, path: Path, branch: str) -> GitResult:
+    def worktree_add(
+        self,
+        path: Path,
+        branch: str,
+        *,
+        create_branch: bool = False,
+        base_branch: str = "main",
+    ) -> GitResult:
         """Add a new worktree."""
         # Ensure path parent exists
         path.parent.mkdir(parents=True, exist_ok=True)
+        if create_branch:
+            # git worktree add -b <branch> <path> <base_branch>
+            return self._run(["worktree", "add", "-b", branch, str(path), base_branch])
         # git worktree add <path> <branch>
         return self._run(["worktree", "add", str(path), branch])
 
