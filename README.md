@@ -1,4 +1,5 @@
 # AI Workflow Engine
+[![CI](https://github.com/NewAITees/workflow-engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NewAITees/workflow-engine/actions/workflows/ci.yml)
 
 GitHubをメッセージキューとして使用する、3エージェント構成の自律型開発ワークフローエンジン。
 

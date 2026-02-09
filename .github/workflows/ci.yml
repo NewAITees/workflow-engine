@@ -4,7 +4,6 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
 
 jobs:
   quality:
@@ -12,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -23,10 +22,12 @@ jobs:
           version: "latest"
 
       - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras
 
       - name: Lint (Ruff)
         run: uv run ruff check .
@@ -43,3 +44,11 @@ jobs:
 
       - name: Test (Pytest)
         run: uv run pytest
+
+      - name: Run pre-commit (if available)
+        run: |
+          if uv run pre-commit --version >/dev/null 2>&1; then
+            uv run pre-commit run --all-files
+          else
+            echo "pre-commit is not available. Skipping."
+          fi
