@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Add parent directory to path for shared imports
@@ -98,6 +99,7 @@ class WorkerAgent:
 
         while True:
             try:
+                self._process_stale_locks()
                 self._process_ready_issues()
                 self._process_changes_requested_prs()
                 time.sleep(self.config.poll_interval)
@@ -111,6 +113,9 @@ class WorkerAgent:
 
     def run_once(self) -> bool:
         """Process one issue/PR and return. For testing."""
+        if self._process_stale_locks():
+            return True
+
         # Try ready issues first
         issues = self.github.list_issues(labels=[self.STATUS_READY])
         if issues:
@@ -123,6 +128,131 @@ class WorkerAgent:
 
         logger.info("No work to process")
         return False
+
+    def _get_stale_timeout_minutes(self) -> int:
+        """Get stale lock timeout from config with safe fallback."""
+        value = getattr(self.config, "stale_lock_timeout_minutes", 30)
+        try:
+            timeout = int(value)
+        except (TypeError, ValueError):
+            timeout = 30
+        return timeout if timeout > 0 else 30
+
+    def _parse_github_datetime(self, ts: str | None) -> datetime | None:
+        """Parse GitHub timestamp string into timezone-aware datetime."""
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _get_lock_reference_time(self, number: int) -> datetime | None:
+        """
+        Get reference timestamp for lock staleness.
+
+        Priority:
+        1. Most recent worker ACK comment timestamp
+        2. Most recent comment timestamp
+        """
+        comments = self.github.get_issue_comments(number, limit=50)
+        latest_comment_time: datetime | None = None
+        latest_ack_time: datetime | None = None
+
+        for comment in comments:
+            created = self._parse_github_datetime(comment.get("created_at"))
+            if created is None:
+                continue
+
+            if latest_comment_time is None or created > latest_comment_time:
+                latest_comment_time = created
+
+            body = str(comment.get("body", ""))
+            if body.startswith("ACK:worker:"):
+                if latest_ack_time is None or created > latest_ack_time:
+                    latest_ack_time = created
+
+        return latest_ack_time or latest_comment_time
+
+    def _is_stale_lock(self, number: int) -> tuple[bool, float | None]:
+        """Check if implementing lock is stale based on reference timestamp."""
+        ref_time = self._get_lock_reference_time(number)
+        if ref_time is None:
+            return False, None
+
+        age_minutes = (datetime.now(UTC) - ref_time).total_seconds() / 60.0
+        return age_minutes > self._get_stale_timeout_minutes(), age_minutes
+
+    def _get_pr_recovery_status(self, pr_number: int) -> str:
+        """
+        Determine status to restore after stale recovery.
+
+        If a CHANGES_REQUESTED review exists, restore to changes-requested.
+        Otherwise restore to reviewing.
+        """
+        reviews = self.github.get_pr_reviews(pr_number)
+        for review in reversed(reviews):
+            if review.get("state") == "CHANGES_REQUESTED":
+                return self.STATUS_CHANGES_REQUESTED
+        return self.STATUS_REVIEWING
+
+    def _process_stale_locks(self) -> bool:
+        """Recover stale locks from issues/PRs stuck in implementing."""
+        recovered = False
+        timeout = self._get_stale_timeout_minutes()
+
+        issues = self.github.list_issues(labels=[self.STATUS_IMPLEMENTING])
+        for issue in issues:
+            is_stale, age_minutes = self._is_stale_lock(issue.number)
+            if not is_stale:
+                continue
+
+            age_text = (
+                f"{age_minutes:.1f} minutes" if age_minutes is not None else "unknown"
+            )
+            logger.warning(
+                f"[{self.agent_id}] Recovering stale issue lock #{issue.number} "
+                f"(age={age_text}, timeout={timeout}m)"
+            )
+            self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+            self.github.add_label(issue.number, self.STATUS_READY)
+            self.github.comment_issue(
+                issue.number,
+                f"⚠️ **Recovered stale lock**\n\n"
+                f"- Previous status: `{self.STATUS_IMPLEMENTING}`\n"
+                f"- New status: `{self.STATUS_READY}`\n"
+                f"- Lock age: {age_text}\n"
+                f"- Timeout: {timeout} minutes",
+            )
+            recovered = True
+
+        prs = self.github.list_prs(labels=[self.STATUS_IMPLEMENTING])
+        for pr in prs:
+            is_stale, age_minutes = self._is_stale_lock(pr.number)
+            if not is_stale:
+                continue
+
+            target_status = self._get_pr_recovery_status(pr.number)
+            age_text = (
+                f"{age_minutes:.1f} minutes" if age_minutes is not None else "unknown"
+            )
+            logger.warning(
+                f"[{self.agent_id}] Recovering stale PR lock #{pr.number} "
+                f"(age={age_text}, timeout={timeout}m) -> {target_status}"
+            )
+            self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
+            self.github.add_pr_label(pr.number, target_status)
+            self.github.comment_pr(
+                pr.number,
+                f"⚠️ **Recovered stale lock**\n\n"
+                f"- Previous status: `{self.STATUS_IMPLEMENTING}`\n"
+                f"- New status: `{target_status}`\n"
+                f"- Lock age: {age_text}\n"
+                f"- Timeout: {timeout} minutes",
+            )
+            recovered = True
+
+        return recovered
 
     def _process_ready_issues(self) -> None:
         """Find and process ready issues."""
