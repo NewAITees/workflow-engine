@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.config import get_agent_config
-from shared.github_client import GitHubClient
+from shared.github_client import GitHubClient, Issue
 from shared.llm_client import LLMClient
 
 # Configure logging
@@ -177,6 +177,11 @@ class PlannerAgent:
 
         comments = self.github.get_issue_comments(issue_number, limit=100)
         escalation = self._latest_escalation(comments)
+        if escalation is None and self.STATUS_FAILED in issue.labels:
+            # Auto-bridge failed issues into escalation flow so Planner can retry.
+            if self._create_failed_issue_escalation(issue, comments):
+                comments = self.github.get_issue_comments(issue_number, limit=100)
+                escalation = self._latest_escalation(comments)
         if escalation is None:
             return False
 
@@ -285,6 +290,32 @@ class PlannerAgent:
             if pattern.search(body):
                 parts.append(body)
         return "\n\n---\n\n".join(parts[-5:]) if parts else "No escalation feedback."
+
+    def _create_failed_issue_escalation(
+        self, issue: Issue, comments: list[dict]
+    ) -> bool:
+        """
+        Add a synthetic worker escalation marker for failed issues.
+
+        This allows Planner to resume failed items without requiring manual
+        comment edits.
+        """
+        latest_failure = self._latest_failure_detail(comments)
+        body = (
+            "ESCALATION:worker\n\n"
+            "Reason: auto-bridge-from-status-failed\n\n"
+            "Planner detected `status:failed` without escalation marker.\n\n"
+            f"{latest_failure}"
+        )
+        return self.github.comment_issue(issue.number, body)
+
+    def _latest_failure_detail(self, comments: list[dict]) -> str:
+        """Extract latest failure context from issue comments."""
+        for comment in reversed(comments):
+            body = str(comment.get("body", "")).strip()
+            if "❌ **Processing failed**" in body or "Processing failed" in body:
+                return f"Latest failure context:\n{body[:2000]}"
+        return "Latest failure context: unavailable."
 
     def _parse_timestamp(self, ts: str | None) -> datetime | None:
         """Parse GitHub timestamp safely."""

@@ -151,3 +151,61 @@ class TestPlannerAgent:
         assert result is True
         agent.github.update_issue_body.assert_not_called()
         agent.github.add_label.assert_any_call(3, agent.STATUS_FAILED)
+
+    @patch("planner_main.LLMClient")
+    @patch("planner_main.GitHubClient")
+    @patch("planner_main.get_agent_config")
+    def test_failed_issue_is_auto_bridged_to_escalation(
+        self, mock_config, mock_github, mock_llm
+    ) -> None:
+        mock_config.return_value = MagicMock(
+            gh_cli="gh", llm_backend="codex", poll_interval=30
+        )
+        mock_llm.return_value.create_spec.return_value = MagicMock(
+            success=True, output="Revised spec from failed"
+        )
+
+        agent = PlannerAgent("owner/repo")
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=4,
+                title="Failed issue",
+                body="Current spec",
+                labels=[agent.STATUS_FAILED],
+            )
+        )
+        agent.github.get_issue_comments = MagicMock(
+            side_effect=[
+                [
+                    {
+                        "body": "❌ **Processing failed**\n\n```\npush failed\n```",
+                        "created_at": "2026-02-09T07:00:00Z",
+                    }
+                ],
+                [
+                    {
+                        "body": "❌ **Processing failed**\n\n```\npush failed\n```",
+                        "created_at": "2026-02-09T07:00:00Z",
+                    },
+                    {
+                        "body": "ESCALATION:worker\n\nReason: auto-bridge-from-status-failed",
+                        "created_at": "2026-02-09T07:01:00Z",
+                    },
+                ],
+            ]
+        )
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.update_issue_body = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+
+        result = agent._try_process_escalated_issue(4)
+
+        assert result is True
+        assert any(
+            "auto-bridge-from-status-failed" in str(call)
+            for call in agent.github.comment_issue.call_args_list
+        )
+        agent.github.update_issue_body.assert_called_once_with(
+            4, "Revised spec from failed"
+        )
