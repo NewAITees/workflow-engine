@@ -187,6 +187,15 @@ class TestGitHubClient:
         assert self.client.comment_issue(1, "message") is False
 
     @patch("subprocess.run")
+    def test_update_issue_body(self, mock_run):
+        """Test updating issue body."""
+        mock_run.return_value = MagicMock(returncode=0)
+        assert self.client.update_issue_body(1, "new body") is True
+
+        mock_run.return_value = MagicMock(returncode=1)
+        assert self.client.update_issue_body(1, "new body") is False
+
+    @patch("subprocess.run")
     def test_get_issue_comments_parses_valid_json(self, mock_run):
         """Test parsing multiple comments with mixed validity."""
         mock_run.return_value = MagicMock(

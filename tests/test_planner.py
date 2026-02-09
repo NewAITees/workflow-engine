@@ -1,0 +1,153 @@
+"""Tests for Planner escalation loop logic."""
+
+import importlib.util
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from shared.github_client import Issue
+
+spec = importlib.util.spec_from_file_location(
+    "planner_main", Path(__file__).parent.parent / "planner-agent" / "main.py"
+)
+if spec is None or spec.loader is None:
+    raise ImportError("Failed to load planner-agent/main.py")
+
+planner_main = importlib.util.module_from_spec(spec)
+sys.modules["planner_main"] = planner_main
+spec.loader.exec_module(planner_main)
+PlannerAgent = planner_main.PlannerAgent
+
+
+class TestPlannerAgent:
+    """Tests for planner escalation processing."""
+
+    @patch("planner_main.LLMClient")
+    @patch("planner_main.GitHubClient")
+    @patch("planner_main.get_agent_config")
+    def test_process_escalated_issue_success(
+        self, mock_config, mock_github, mock_llm
+    ) -> None:
+        mock_config.return_value = MagicMock(
+            gh_cli="gh", llm_backend="codex", poll_interval=30
+        )
+        llm = mock_llm.return_value
+        llm.create_spec.return_value = MagicMock(success=True, output="Revised spec")
+
+        agent = PlannerAgent("owner/repo")
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=1,
+                title="Issue",
+                body="Current spec",
+                labels=[agent.STATUS_ESCALATED],
+            )
+        )
+        agent.github.get_issue_comments = MagicMock(
+            return_value=[
+                {
+                    "body": "ESCALATION:worker\nNeed clearer acceptance criteria.",
+                    "created_at": "2026-02-09T07:00:00Z",
+                }
+            ]
+        )
+        agent.github.update_issue_body = MagicMock(return_value=True)
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+
+        result = agent._try_process_escalated_issue(1)
+
+        assert result is True
+        agent.github.update_issue_body.assert_called_once_with(1, "Revised spec")
+        assert any(
+            "PLANNER_RETRY:1" in str(call)
+            for call in agent.github.comment_issue.call_args_list
+        )
+        agent.github.add_label.assert_called_with(1, agent.STATUS_READY)
+
+    @patch("planner_main.LLMClient")
+    @patch("planner_main.GitHubClient")
+    @patch("planner_main.get_agent_config")
+    def test_process_escalated_issue_skips_if_no_new_escalation(
+        self, mock_config, mock_github, mock_llm
+    ) -> None:
+        mock_config.return_value = MagicMock(
+            gh_cli="gh", llm_backend="codex", poll_interval=30
+        )
+        mock_llm.return_value.create_spec.return_value = MagicMock(
+            success=True, output="ignored"
+        )
+
+        agent = PlannerAgent("owner/repo")
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=2,
+                title="Issue",
+                body="Current spec",
+                labels=[agent.STATUS_ESCALATED],
+            )
+        )
+        agent.github.get_issue_comments = MagicMock(
+            return_value=[
+                {
+                    "body": "ESCALATION:reviewer\nNeed redesign.",
+                    "created_at": "2026-02-09T07:00:00Z",
+                },
+                {
+                    "body": "Planner done.\nPLANNER_RETRY:1",
+                    "created_at": "2026-02-09T07:10:00Z",
+                },
+            ]
+        )
+        agent.github.update_issue_body = MagicMock(return_value=True)
+
+        result = agent._try_process_escalated_issue(2)
+
+        assert result is False
+        agent.github.update_issue_body.assert_not_called()
+
+    @patch("planner_main.LLMClient")
+    @patch("planner_main.GitHubClient")
+    @patch("planner_main.get_agent_config")
+    def test_process_escalated_issue_marks_failed_at_retry_limit(
+        self, mock_config, mock_github, mock_llm
+    ) -> None:
+        mock_config.return_value = MagicMock(
+            gh_cli="gh", llm_backend="codex", poll_interval=30
+        )
+        mock_llm.return_value.create_spec.return_value = MagicMock(
+            success=True, output="ignored"
+        )
+
+        agent = PlannerAgent("owner/repo")
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=3,
+                title="Issue",
+                body="Current spec",
+                labels=[agent.STATUS_ESCALATED],
+            )
+        )
+        agent.github.get_issue_comments = MagicMock(
+            return_value=[
+                {
+                    "body": "ESCALATION:worker\nStill failing.",
+                    "created_at": "2026-02-09T08:00:00Z",
+                },
+                {
+                    "body": "PLANNER_RETRY:3",
+                    "created_at": "2026-02-09T07:50:00Z",
+                },
+            ]
+        )
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.update_issue_body = MagicMock(return_value=True)
+
+        result = agent._try_process_escalated_issue(3)
+
+        assert result is True
+        agent.github.update_issue_body.assert_not_called()
+        agent.github.add_label.assert_any_call(3, agent.STATUS_FAILED)
