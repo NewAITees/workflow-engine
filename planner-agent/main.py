@@ -37,10 +37,19 @@ class PlannerAgent:
     STATUS_FAILED = "status:failed"
     MAX_ESCALATION_RETRIES = 3
 
-    def __init__(self, repo: str, config_path: str | None = None):
+    def __init__(
+        self,
+        repo: str,
+        config_path: str | None = None,
+        dry_run: str | None = None,
+    ):
         self.repo = repo
         self.config = get_agent_config(repo, config_path)
-        self.github = GitHubClient(repo, gh_cli=self.config.gh_cli)
+        if dry_run is not None:
+            self.config.dry_run = dry_run
+        self.github = GitHubClient(
+            repo, gh_cli=self.config.gh_cli, dry_run=self.config.dry_run
+        )
         self.llm = LLMClient(self.config)
 
         logger.info(f"Planner Agent initialized for {repo}")
@@ -408,13 +417,18 @@ def main() -> None:
         action="store_true",
         help="Run planner escalation loop",
     )
+    parser.add_argument(
+        "--dry-run",
+        choices=["execute-tests", "simulate-all"],
+        help="Dry-run mode: execute-tests or simulate-all",
+    )
 
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    agent = PlannerAgent(args.repo, config_path=args.config)
+    agent = PlannerAgent(args.repo, config_path=args.config, dry_run=args.dry_run)
 
     if args.story:
         # Non-interactive mode

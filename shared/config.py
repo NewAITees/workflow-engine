@@ -3,8 +3,23 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, TypeAlias, cast
 
 import yaml
+
+DryRunMode: TypeAlias = Literal["execute-tests", "simulate-all"]
+
+
+def validate_dry_run_mode(dry_run: str | None) -> DryRunMode | None:
+    """Validate dry-run mode value."""
+    if dry_run is None:
+        return None
+    if dry_run not in ("execute-tests", "simulate-all"):
+        raise ValueError(
+            "Invalid dry_run: "
+            f"{dry_run}. Must be 'execute-tests' or 'simulate-all'"
+        )
+    return cast(DryRunMode, dry_run)
 
 
 @dataclass
@@ -22,6 +37,7 @@ class AgentConfig:
     auto_merge: bool = False  # Auto-merge approved PRs
     merge_method: str = "squash"  # "squash", "merge", or "rebase"
     stale_lock_timeout_minutes: int = 30  # Recover stale implementing locks
+    dry_run: DryRunMode | None = None  # None | execute-tests | simulate-all
 
     def __post_init__(self) -> None:
         if self.work_dir is None:
@@ -41,6 +57,7 @@ class AgentConfig:
             )
         if self.stale_lock_timeout_minutes <= 0:
             raise ValueError("stale_lock_timeout_minutes must be a positive integer")
+        self.dry_run = validate_dry_run_mode(self.dry_run)
 
 
 @dataclass

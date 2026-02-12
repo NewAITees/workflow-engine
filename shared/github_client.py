@@ -2,8 +2,11 @@
 
 import json
 import logging
+import shlex
 import subprocess
 from dataclasses import dataclass
+
+from shared.config import validate_dry_run_mode
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +38,21 @@ class PullRequest:
 class GitHubClient:
     """GitHub operations via gh CLI."""
 
-    def __init__(self, repo: str, gh_cli: str = "gh"):
+    def __init__(
+        self, repo: str, gh_cli: str = "gh", dry_run: str | None = None
+    ):
         self.repo = repo
         self.gh = gh_cli
+        self.dry_run = validate_dry_run_mode(dry_run)
+
+    def _format_cmd(self, args: list[str]) -> str:
+        """Format command for logs."""
+        cmd = [self.gh] + args
+        return " ".join(shlex.quote(part) for part in cmd)
+
+    def _dry_run_write(self, args: list[str]) -> None:
+        """Log suppressed write operation."""
+        logger.info(f"[DRY-RUN] would run: {self._format_cmd(args)}")
 
     def _run(
         self, args: list[str], check: bool = True, capture: bool = True
@@ -151,6 +166,9 @@ class GitHubClient:
             "--add-label",
             label,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -165,6 +183,9 @@ class GitHubClient:
             "--remove-label",
             label,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -179,6 +200,9 @@ class GitHubClient:
             "--body",
             body,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -193,6 +217,9 @@ class GitHubClient:
             "--body",
             body,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -239,6 +266,9 @@ class GitHubClient:
             for label in labels:
                 args.extend(["--label", label])
 
+        if self.dry_run:
+            self._dry_run_write(args)
+            return 1
         result = self._run(args, check=False)
         if result.returncode != 0:
             return None
@@ -353,6 +383,9 @@ class GitHubClient:
             for label in labels:
                 args.extend(["--label", label])
 
+        if self.dry_run:
+            self._dry_run_write(args)
+            return f"https://github.com/{self.repo}/pull/0"
         result = self._run(args, check=False)
         if result.returncode != 0:
             logger.error(f"Failed to create PR: {result.stderr}")
@@ -371,6 +404,9 @@ class GitHubClient:
             "--add-label",
             label,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -385,6 +421,9 @@ class GitHubClient:
             "--remove-label",
             label,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -399,6 +438,9 @@ class GitHubClient:
             "--body",
             body,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -414,6 +456,9 @@ class GitHubClient:
             "--body",
             body,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -429,6 +474,9 @@ class GitHubClient:
             "--body",
             body,
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
@@ -443,6 +491,9 @@ class GitHubClient:
             f"--{method}",
             "--delete-branch",
         ]
+        if self.dry_run:
+            self._dry_run_write(args)
+            return True
         result = self._run(args, check=False)
         return result.returncode == 0
 
