@@ -484,8 +484,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--dry-run",
+        nargs="?",
+        const="simulate-all",
         choices=["execute-tests", "simulate-all"],
-        help="Dry-run mode: execute-tests or simulate-all",
+        help="Dry-run mode (default: simulate-all): execute-tests or simulate-all",
     )
 
     args = parser.parse_args()

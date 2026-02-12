@@ -40,6 +40,11 @@ class LockManager:
         """Create ACK message for locking."""
         return f"ACK:{self.agent_type}:{self.agent_id}:{timestamp}"
 
+    def _dry_run_mode(self) -> str | None:
+        """Return dry-run mode when GitHub client is configured for it."""
+        mode = getattr(self.github, "dry_run", None)
+        return mode if isinstance(mode, str) else None
+
     def _parse_ack_message(self, message: str) -> dict | None:
         """Parse ACK message."""
         if not message.startswith("ACK:"):
@@ -66,6 +71,13 @@ class LockManager:
         Returns:
             agent_id if there's an active lock, None otherwise
         """
+        if self._dry_run_mode():
+            logger.info(
+                f"[DRY-RUN] would run: check active lock on #{issue_number} "
+                f"for agent type {self.agent_type}"
+            )
+            return None
+
         current_time = int(time.time() * 1000)
         min_valid_timestamp = current_time - LOCK_TIMEOUT
 
@@ -107,6 +119,8 @@ class LockManager:
         Returns:
             LockResult indicating success or failure
         """
+        dry_run_mode = self._dry_run_mode()
+
         # Check for existing active lock
         active_lock_holder = self.get_active_lock(issue_number)
         if active_lock_holder:
@@ -127,6 +141,16 @@ class LockManager:
 
         timestamp = int(time.time() * 1000)
         ack_msg = self._create_ack_message(timestamp)
+
+        if dry_run_mode:
+            logger.info(
+                f"[DRY-RUN] would run: simulate issue lock #{issue_number} "
+                f"({from_status} -> {to_status})"
+            )
+            self.github.remove_label(issue_number, from_status)
+            self.github.add_label(issue_number, to_status)
+            return LockResult(success=True, lock_id=ack_msg)
+
         # Define time window for valid ACKs (only ACKs within last 30 seconds count)
         min_valid_timestamp = timestamp - 30000
 
@@ -206,6 +230,8 @@ class LockManager:
         Similar to issue locking but for PRs.
         Checks for existing active locks (within LOCK_TIMEOUT) before attempting.
         """
+        dry_run_mode = self._dry_run_mode()
+
         # Check for existing active lock
         active_lock_holder = self.get_active_lock(pr_number)
         if active_lock_holder:
@@ -222,6 +248,16 @@ class LockManager:
 
         timestamp = int(time.time() * 1000)
         ack_msg = self._create_ack_message(timestamp)
+
+        if dry_run_mode:
+            logger.info(
+                f"[DRY-RUN] would run: simulate PR lock #{pr_number} "
+                f"({from_status} -> {to_status})"
+            )
+            self.github.remove_pr_label(pr_number, from_status)
+            self.github.add_pr_label(pr_number, to_status)
+            return LockResult(success=True, lock_id=ack_msg)
+
         min_valid_timestamp = timestamp - 30000
 
         # Step 1: Post ACK comment

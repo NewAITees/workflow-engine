@@ -211,3 +211,33 @@ def test_agent_cli_accepts_and_forwards_dry_run_option(
     assert exc.value.code == 0
     assert agent_cls.call_args is not None
     assert agent_cls.call_args.kwargs.get("dry_run") == "simulate-all"
+
+
+@pytest.mark.parametrize(
+    ("module", "agent_name"),
+    [
+        (planner_main, "PlannerAgent"),
+        (worker_main, "WorkerAgent"),
+        (reviewer_main, "ReviewerAgent"),
+    ],
+)
+def test_agent_cli_accepts_dry_run_without_explicit_mode(
+    module, agent_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--dry-run without a value should default to simulate-all."""
+    agent_cls = MagicMock()
+    agent_instance = agent_cls.return_value
+    agent_instance.run_once.return_value = True
+
+    if agent_name == "PlannerAgent":
+        agent_instance.create_spec.return_value = None
+
+    monkeypatch.setattr(module, agent_name, agent_cls)
+    monkeypatch.setattr(sys, "argv", ["prog", "owner/repo", "--once", "--dry-run"])
+
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+
+    assert exc.value.code == 0
+    assert agent_cls.call_args is not None
+    assert agent_cls.call_args.kwargs.get("dry_run") == "simulate-all"

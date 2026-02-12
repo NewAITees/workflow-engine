@@ -104,14 +104,14 @@ class GitOperations:
         """Clone the repository or pull if it exists."""
         if self.workspace.exists():
             logger.info(f"Updating existing workspace: {self.workspace}")
+            default_branch = self.get_default_branch()
             if self.dry_run:
                 self._dry_run_write(["fetch", "origin"])
-                self._dry_run_write(["checkout", "main"])
-                self._dry_run_write(["reset", "--hard", "origin/main"])
+                self._dry_run_write(["checkout", default_branch])
+                self._dry_run_write(["reset", "--hard", f"origin/{default_branch}"])
                 self._dry_run_write(["clean", "-fd"])
                 return self._dry_run_write(["pull"])
             # Detect and checkout the default branch
-            default_branch = self.get_default_branch()
             self._run(["fetch", "origin"], check=False)
             self._run(["checkout", default_branch], check=False)
             self._run(["reset", "--hard", f"origin/{default_branch}"])
@@ -140,13 +140,12 @@ class GitOperations:
 
     def create_branch(self, branch_name: str) -> GitResult:
         """Create and checkout a new branch."""
+        default_branch = self.get_default_branch()
         if self.dry_run:
-            self._dry_run_write(["checkout", "main"])
+            self._dry_run_write(["checkout", default_branch])
             self._dry_run_write(["pull"])
             self._dry_run_write(["branch", "-D", branch_name])
             return self._dry_run_write(["checkout", "-b", branch_name])
-
-        default_branch = self.get_default_branch()
 
         # Ensure we're on the default branch first
         self._run(["checkout", default_branch])
@@ -228,12 +227,12 @@ class GitOperations:
 
     def cleanup_branch(self, branch_name: str) -> None:
         """Clean up a branch (local and remote)."""
+        default_branch = self.get_default_branch()
         if self.dry_run:
-            self._dry_run_write(["checkout", "main"])
+            self._dry_run_write(["checkout", default_branch])
             self._dry_run_write(["branch", "-D", branch_name])
             self._dry_run_write(["push", "origin", "--delete", branch_name])
             return
-        default_branch = self.get_default_branch()
         self._run(["checkout", default_branch], check=False)
         self._run(["branch", "-D", branch_name], check=False)
         self._run(["push", "origin", "--delete", branch_name], check=False)

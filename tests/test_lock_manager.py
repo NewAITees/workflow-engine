@@ -114,3 +114,19 @@ def test_mark_failed_updates_labels_and_comments() -> None:
     github.remove_label.assert_called_once_with(99, "status:working")
     github.add_label.assert_called_once_with(99, "status:failed")
     github.comment_issue.assert_called_once()
+
+
+def test_try_lock_issue_simulated_in_dry_run() -> None:
+    github = MagicMock()
+    github.dry_run = "simulate-all"
+    github.remove_label.return_value = True
+    github.add_label.return_value = True
+
+    manager = LockManager(github, "worker", "agent-1")
+    result = manager.try_lock_issue(10, "status:ready", "status:implementing")
+
+    assert result.success is True
+    github.comment_issue.assert_not_called()
+    github.get_issue_comments.assert_not_called()
+    github.remove_label.assert_called_once_with(10, "status:ready")
+    github.add_label.assert_called_once_with(10, "status:implementing")
