@@ -15,11 +15,16 @@ logger = logging.getLogger(__name__)
 class WorkspaceManager:
     """Manages workspaces using git worktrees."""
 
-    def __init__(self, repo: str, main_work_dir: Path):
+    def __init__(
+        self, repo: str, main_work_dir: Path, dry_run: str | None = None
+    ):
         self.repo = repo
         self.main_work_dir = main_work_dir
+        self.dry_run = dry_run
         # The main 'store' operations
-        self.main_git = GitOperations(repo, workspace_path=main_work_dir)
+        self.main_git = GitOperations(
+            repo, workspace_path=main_work_dir, dry_run=dry_run
+        )
 
     def ensure_main_repo(self) -> None:
         """Ensure the main repository exists."""
@@ -99,7 +104,9 @@ class WorkspaceManager:
 
         try:
             # Yield a GitOperations instance for this worktree
-            yield GitOperations(self.repo, workspace_path=worktree_path)
+            yield GitOperations(
+                self.repo, workspace_path=worktree_path, dry_run=self.dry_run
+            )
         finally:
             logger.info(f"Removing worktree at {worktree_path}")
             self.main_git.worktree_remove(worktree_path)

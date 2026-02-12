@@ -1,9 +1,12 @@
 """Git operations for worker agent."""
 
 import logging
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from shared.config import validate_dry_run_mode
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,7 @@ class GitOperations:
         repo: str,
         work_base: Path | None = None,
         workspace_path: Path | None = None,
+        dry_run: str | None = None,
     ):
         """
         Initialize git operations.
@@ -35,6 +39,7 @@ class GitOperations:
             workspace_path: Explicit path to workspace (overrides work_base)
         """
         self.repo = repo
+        self.dry_run = validate_dry_run_mode(dry_run)
 
         if workspace_path:
             self.workspace = Path(workspace_path)
@@ -47,6 +52,22 @@ class GitOperations:
             self.workspace = self.work_base / repo.replace("/", "_")
         else:
             raise ValueError("Either work_base or workspace_path must be provided")
+
+    def _format_cmd(self, args: list[str]) -> str:
+        """Format command for logs."""
+        cmd = ["git"] + args
+        return " ".join(shlex.quote(part) for part in cmd)
+
+    def _dry_run_write(
+        self, args: list[str], cwd: Path | None = None
+    ) -> GitResult:
+        """Log suppressed write operation."""
+        work_dir = cwd or self.workspace
+        logger.info(f"[DRY-RUN] would run: {self._format_cmd(args)}")
+        return GitResult(
+            success=True,
+            output=f"[DRY-RUN] simulated in {work_dir}",
+        )
 
     def _run(
         self,
@@ -83,8 +104,14 @@ class GitOperations:
         """Clone the repository or pull if it exists."""
         if self.workspace.exists():
             logger.info(f"Updating existing workspace: {self.workspace}")
-            # Detect and checkout the default branch
             default_branch = self.get_default_branch()
+            if self.dry_run:
+                self._dry_run_write(["fetch", "origin"])
+                self._dry_run_write(["checkout", default_branch])
+                self._dry_run_write(["reset", "--hard", f"origin/{default_branch}"])
+                self._dry_run_write(["clean", "-fd"])
+                return self._dry_run_write(["pull"])
+            # Detect and checkout the default branch
             self._run(["fetch", "origin"], check=False)
             self._run(["checkout", default_branch], check=False)
             self._run(["reset", "--hard", f"origin/{default_branch}"])
@@ -92,6 +119,11 @@ class GitOperations:
             return self._run(["pull"])
         else:
             logger.info(f"Cloning repository to: {self.workspace}")
+            if self.dry_run:
+                return self._dry_run_write(
+                    ["clone", f"https://github.com/{self.repo}.git", str(self.workspace)],
+                    cwd=self.work_base,
+                )
             return self._run(
                 ["clone", f"https://github.com/{self.repo}.git", str(self.workspace)],
                 cwd=self.work_base,
@@ -109,6 +141,11 @@ class GitOperations:
     def create_branch(self, branch_name: str) -> GitResult:
         """Create and checkout a new branch."""
         default_branch = self.get_default_branch()
+        if self.dry_run:
+            self._dry_run_write(["checkout", default_branch])
+            self._dry_run_write(["pull"])
+            self._dry_run_write(["branch", "-D", branch_name])
+            return self._dry_run_write(["checkout", "-b", branch_name])
 
         # Ensure we're on the default branch first
         self._run(["checkout", default_branch])
@@ -127,6 +164,13 @@ class GitOperations:
         Falls back to creating a fresh branch from default branch when
         the remote branch does not exist.
         """
+        if self.dry_run:
+            self._dry_run_write(["fetch", "origin"])
+            self._dry_run_write(["rev-parse", "--verify", f"origin/{branch_name}"])
+            return self._dry_run_write(
+                ["checkout", "-B", branch_name, f"origin/{branch_name}"]
+            )
+
         self._run(["fetch", "origin"], check=False)
         remote_ref = f"origin/{branch_name}"
         remote_exists = self._run(["rev-parse", "--verify", remote_ref], check=False)
@@ -139,10 +183,16 @@ class GitOperations:
 
     def stage_all(self) -> GitResult:
         """Stage all changes."""
+        if self.dry_run:
+            return self._dry_run_write(["add", "-A"])
         return self._run(["add", "-A"])
 
     def commit(self, message: str) -> GitResult:
         """Create a commit."""
+        if self.dry_run:
+            self._dry_run_write(["add", "-A"])
+            return self._dry_run_write(["commit", "-m", message])
+
         # Stage all changes first
         self.stage_all()
 
@@ -158,6 +208,8 @@ class GitOperations:
         args = ["push", "-u", "origin", branch_name]
         if force:
             args.insert(1, "--force-with-lease")
+        if self.dry_run:
+            return self._dry_run_write(args)
         return self._run(args)
 
     def get_diff(self, base_branch: str | None = None) -> str:
@@ -176,6 +228,11 @@ class GitOperations:
     def cleanup_branch(self, branch_name: str) -> None:
         """Clean up a branch (local and remote)."""
         default_branch = self.get_default_branch()
+        if self.dry_run:
+            self._dry_run_write(["checkout", default_branch])
+            self._dry_run_write(["branch", "-D", branch_name])
+            self._dry_run_write(["push", "origin", "--delete", branch_name])
+            return
         self._run(["checkout", default_branch], check=False)
         self._run(["branch", "-D", branch_name], check=False)
         self._run(["push", "origin", "--delete", branch_name], check=False)
@@ -193,17 +250,27 @@ class GitOperations:
         path.parent.mkdir(parents=True, exist_ok=True)
         if create_branch:
             # git worktree add -b <branch> <path> <base_branch>
+            if self.dry_run:
+                return self._dry_run_write(
+                    ["worktree", "add", "-b", branch, str(path), base_branch]
+                )
             return self._run(["worktree", "add", "-b", branch, str(path), base_branch])
         # git worktree add <path> <branch>
+        if self.dry_run:
+            return self._dry_run_write(["worktree", "add", str(path), branch])
         return self._run(["worktree", "add", str(path), branch])
 
     def worktree_remove(self, path: Path) -> GitResult:
         """Remove a worktree."""
         # git worktree remove <path>
+        if self.dry_run:
+            return self._dry_run_write(["worktree", "remove", str(path)])
         return self._run(["worktree", "remove", str(path)])
 
     def worktree_prune(self) -> GitResult:
         """Prune worktree information."""
+        if self.dry_run:
+            return self._dry_run_write(["worktree", "prune"])
         return self._run(["worktree", "prune"])
 
     @property

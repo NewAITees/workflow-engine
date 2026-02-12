@@ -70,22 +70,35 @@ class WorkerAgent:
         "insufficient information",
     ]
 
-    def __init__(self, repo: str, config_path: str | None = None):
+    def __init__(
+        self,
+        repo: str,
+        config_path: str | None = None,
+        dry_run: str | None = None,
+    ):
         self.repo = repo
         self.config = get_agent_config(repo, config_path)
+        if dry_run is not None:
+            self.config.dry_run = dry_run
         assert self.config.work_dir is not None
 
         # Generate unique agent ID
         self.agent_id = f"worker-{uuid.uuid4().hex[:8]}"
 
         # Initialize components
-        self.github = GitHubClient(repo, gh_cli=self.config.gh_cli)
+        self.github = GitHubClient(
+            repo, gh_cli=self.config.gh_cli, dry_run=self.config.dry_run
+        )
         self.lock = LockManager(
             self.github, agent_type="worker", agent_id=self.agent_id
         )
         self.llm = LLMClient(self.config)
-        self.git = GitOperations(repo, Path(self.config.work_dir))
-        self.workspace_manager = WorkspaceManager(repo, self.git.path)
+        self.git = GitOperations(
+            repo, Path(self.config.work_dir), dry_run=self.config.dry_run
+        )
+        self.workspace_manager = WorkspaceManager(
+            repo, self.git.path, dry_run=self.config.dry_run
+        )
 
         logger.info(f"Worker Agent initialized for {repo}")
         logger.info(f"Agent ID: {self.agent_id}")
@@ -1274,6 +1287,14 @@ Please analyze and fix the CI failures.
             (success, output): 成功フラグとテスト出力
         """
         repo_path = git_path or self.git.path
+
+        if getattr(self.config, "dry_run", None) == "simulate-all":
+            test_file = f"tests/test_issue_{issue_number}.py"
+            command = f"pytest {test_file} -v --tb=short"
+            message = f"[DRY-RUN] would run: {command}"
+            logger.info(f"[{self.agent_id}] {message}")
+            return True, message
+
         test_path = self._locate_issue_test_file(issue_number, repo_path)
 
         if test_path is None:
@@ -1468,6 +1489,10 @@ Please analyze and fix the CI failures.
                 - (False, "pending") - CI timeout (still pending)
                 - (False, "failure") - CI failed
         """
+        if getattr(self.config, "dry_run", None) == "simulate-all":
+            logger.info(f"[{self.agent_id}] [DRY-RUN] would run: wait for CI checks")
+            return True, "success"
+
         if timeout is None:
             timeout = self.CI_WAIT_TIMEOUT
 
@@ -1650,13 +1675,20 @@ def main() -> None:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--dry-run",
+        nargs="?",
+        const="simulate-all",
+        choices=["execute-tests", "simulate-all"],
+        help="Dry-run mode (default: simulate-all): execute-tests or simulate-all",
+    )
 
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    agent = WorkerAgent(args.repo, config_path=args.config)
+    agent = WorkerAgent(args.repo, config_path=args.config, dry_run=args.dry_run)
 
     if args.once:
         success = agent.run_once()
