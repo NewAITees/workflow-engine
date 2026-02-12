@@ -198,15 +198,26 @@ class PlannerAgent:
 
         comments = self.github.get_issue_comments(issue_number, limit=100)
         escalation = self._latest_escalation(comments)
-        if escalation is None and self.STATUS_FAILED in issue.labels:
-            # Auto-bridge failed issues into escalation flow so Planner can retry.
-            if self._create_failed_issue_escalation(issue, comments):
-                comments = self.github.get_issue_comments(issue_number, limit=100)
-                escalation = self._latest_escalation(comments)
+        retry_count, retry_ts = self._latest_planner_retry(comments)
+
+        # Auto-bridge: create new escalation for status:failed issues when
+        # no escalation exists OR the existing one is stale (older than last retry).
+        if self.STATUS_FAILED in issue.labels:
+            stale = False
+            if escalation is not None and retry_ts is not None:
+                esc_ts = self._parse_timestamp(escalation.get("created_at"))
+                stale = esc_ts is not None and esc_ts <= retry_ts
+            if escalation is None or stale:
+                if retry_count >= self.MAX_ESCALATION_RETRIES:
+                    # Already exhausted retries — leave in status:failed
+                    return True
+                if self._create_failed_issue_escalation(issue, comments):
+                    comments = self.github.get_issue_comments(issue_number, limit=100)
+                    escalation = self._latest_escalation(comments)
+
         if escalation is None:
             return False
 
-        retry_count, retry_ts = self._latest_planner_retry(comments)
         escalation_ts = self._parse_timestamp(escalation.get("created_at"))
         if (
             retry_ts is not None

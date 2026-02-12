@@ -213,6 +213,114 @@ class TestPlannerAgent:
     @patch("planner_main.LLMClient")
     @patch("planner_main.GitHubClient")
     @patch("planner_main.get_agent_config")
+    def test_stale_escalation_triggers_new_bridge(
+        self, mock_config, mock_github, mock_llm
+    ) -> None:
+        """When status:failed with stale escalation, Planner creates a new bridge."""
+        mock_config.return_value = MagicMock(
+            gh_cli="gh", llm_backend="codex", poll_interval=30
+        )
+        mock_llm.return_value.create_spec.return_value = MagicMock(
+            success=True, output="Revised spec v2"
+        )
+
+        agent = PlannerAgent("owner/repo")
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=5,
+                title="Re-failed issue",
+                body="Current spec",
+                labels=[agent.STATUS_FAILED],
+            )
+        )
+        agent.github.get_issue_comments = MagicMock(
+            side_effect=[
+                # First read: stale escalation + newer retry
+                [
+                    {
+                        "body": "ESCALATION:worker\nOriginal failure.",
+                        "created_at": "2026-02-09T07:00:00Z",
+                    },
+                    {
+                        "body": "PLANNER_RETRY:1",
+                        "created_at": "2026-02-09T07:10:00Z",
+                    },
+                ],
+                # Second read: after new bridge comment is posted
+                [
+                    {
+                        "body": "ESCALATION:worker\nOriginal failure.",
+                        "created_at": "2026-02-09T07:00:00Z",
+                    },
+                    {
+                        "body": "PLANNER_RETRY:1",
+                        "created_at": "2026-02-09T07:10:00Z",
+                    },
+                    {
+                        "body": "ESCALATION:worker\n\nReason: auto-bridge-from-status-failed",
+                        "created_at": "2026-02-09T08:00:00Z",
+                    },
+                ],
+            ]
+        )
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.update_issue_body = MagicMock(return_value=True)
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+
+        result = agent._try_process_escalated_issue(5)
+
+        assert result is True
+        agent.github.update_issue_body.assert_called_once_with(5, "Revised spec v2")
+
+    @patch("planner_main.LLMClient")
+    @patch("planner_main.GitHubClient")
+    @patch("planner_main.get_agent_config")
+    def test_stale_escalation_exhausted_retries_skips(
+        self, mock_config, mock_github, mock_llm
+    ) -> None:
+        """When stale escalation + max retries reached, Planner skips silently."""
+        mock_config.return_value = MagicMock(
+            gh_cli="gh", llm_backend="codex", poll_interval=30
+        )
+
+        agent = PlannerAgent("owner/repo")
+        agent.github.get_issue = MagicMock(
+            return_value=Issue(
+                number=6,
+                title="Exhausted issue",
+                body="Current spec",
+                labels=[agent.STATUS_FAILED],
+            )
+        )
+        agent.github.get_issue_comments = MagicMock(
+            return_value=[
+                {
+                    "body": "ESCALATION:worker\nFailure.",
+                    "created_at": "2026-02-09T07:00:00Z",
+                },
+                {
+                    "body": "PLANNER_RETRY:3",
+                    "created_at": "2026-02-09T07:10:00Z",
+                },
+            ]
+        )
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.update_issue_body = MagicMock(return_value=True)
+
+        result = agent._try_process_escalated_issue(6)
+
+        assert result is True
+        agent.github.update_issue_body.assert_not_called()
+        # Should NOT create a new escalation bridge
+        assert not any(
+            "auto-bridge" in str(call)
+            for call in agent.github.comment_issue.call_args_list
+        )
+
+    @patch("planner_main.LLMClient")
+    @patch("planner_main.GitHubClient")
+    @patch("planner_main.get_agent_config")
     def test_process_escalations_scans_only_escalated_and_failed(
         self, mock_config, mock_github, mock_llm
     ) -> None:
