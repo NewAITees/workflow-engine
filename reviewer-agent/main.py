@@ -50,6 +50,7 @@ class ReviewerAgent:
     STATUS_SPEC_REVIEW = "status:spec-review"
     STATUS_READY = "status:ready"
     STATUS_ESCALATED = "status:escalated"
+    STATUS_FAILED = "status:failed"
     STATUS_REVIEWING = "status:reviewing"
     STATUS_IN_REVIEW = "status:in-review"
     STATUS_APPROVED = "status:approved"
@@ -170,6 +171,7 @@ class ReviewerAgent:
                 )
                 self.github.remove_label(issue.number, self.STATUS_SPEC_REVIEW)
                 self.github.remove_label(issue.number, self.STATUS_ESCALATED)
+                self.github.remove_label(issue.number, self.STATUS_FAILED)
                 self.github.add_label(issue.number, self.STATUS_READY)
                 return True
 
@@ -199,6 +201,7 @@ class ReviewerAgent:
                 f"`{self.STATUS_SPEC_REVIEW}` for re-review.",
             )
             self.github.remove_label(issue.number, self.STATUS_SPEC_REVIEW)
+            self.github.remove_label(issue.number, self.STATUS_READY)
             self.github.add_label(issue.number, self.STATUS_ESCALATED)
             return True
         except Exception as e:

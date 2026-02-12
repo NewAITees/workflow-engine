@@ -259,6 +259,7 @@ class PlannerAgent:
             f"PLANNER_RETRY:{new_retry}\n\n"
             f"Transitioning issue back to `{self.STATUS_SPEC_REVIEW}`.",
         )
+        self.github.remove_label(issue.number, self.STATUS_READY)
         self.github.remove_label(issue.number, self.STATUS_ESCALATED)
         self.github.remove_label(issue.number, self.STATUS_FAILED)
         self.github.add_label(issue.number, self.STATUS_SPEC_REVIEW)

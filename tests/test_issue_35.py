@@ -155,6 +155,10 @@ def test_planner_revised_spec_returns_to_spec_review(
         call.args == (35, "status:spec-review")
         for call in planner_agent.github.add_label.call_args_list
     )
+    assert any(
+        call.args == (35, planner_agent.STATUS_READY)
+        for call in planner_agent.github.remove_label.call_args_list
+    )
     assert not any(
         call.args == (35, planner_agent.STATUS_READY)
         for call in planner_agent.github.add_label.call_args_list
@@ -210,6 +214,7 @@ def test_reviewer_spec_review_ok_transitions_to_ready(
     reviewer_agent.github.remove_label.assert_any_call(
         issue.number, "status:spec-review"
     )
+    reviewer_agent.github.remove_label.assert_any_call(issue.number, "status:failed")
     reviewer_agent.github.add_label.assert_any_call(issue.number, "status:ready")
     combined_comments = "\n".join(
         str(call.args[1]) for call in reviewer_agent.github.comment_issue.call_args_list
@@ -245,6 +250,10 @@ def test_reviewer_spec_review_ng_adds_escalation_and_rework_guidance(
     assert any(
         call.args == (issue.number, "status:escalated")
         for call in reviewer_agent.github.add_label.call_args_list
+    )
+    assert any(
+        call.args == (issue.number, "status:ready")
+        for call in reviewer_agent.github.remove_label.call_args_list
     )
     assert not any(
         call.args == (issue.number, "status:ready")
