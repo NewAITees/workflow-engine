@@ -7,7 +7,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
-from shared.git_operations import GitOperations
+from shared.git_operations import GitOperations, GitResult
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +72,20 @@ class WorkspaceManager:
             # If remove failed or it wasn't a worktree but a dir, force remove dir?
             # Git worktree remove should handle cleaning the entry.
 
-        result = self.main_git.worktree_add(
-            worktree_path,
-            branch,
-            create_branch=create_branch,
-            base_branch=base_branch,
-        )
+        def add_wrapped(create_flag: bool) -> GitResult:
+            sync_result = self.main_git.ensure_branch_up_to_date(base_branch)
+            if not sync_result.success:
+                raise RuntimeError(
+                    f"Failed to sync base branch '{base_branch}': {sync_result.error}"
+                )
+            return self.main_git.worktree_add(
+                worktree_path,
+                branch,
+                create_branch=create_flag,
+                base_branch=base_branch,
+            )
+
+        result = add_wrapped(create_branch)
         if not result.success:
             # Try pruning and retry - sometimes metadata gets stale
             logger.warning(
@@ -87,12 +95,12 @@ class WorkspaceManager:
 
             # If the branch is already checked out, we might need to detach or force.
             # But for now, let's assume standard behavior.
-            result = self.main_git.worktree_add(
-                worktree_path,
-                branch,
-                create_branch=create_branch,
-                base_branch=base_branch,
-            )
+            try:
+                result = add_wrapped(False)
+            except RuntimeError as inner_error:
+                raise RuntimeError(
+                    f"Failed to recreate worktree: {inner_error}"
+                ) from inner_error
 
             if not result.success:
                 raise RuntimeError(f"Failed to create worktree: {result.error}")

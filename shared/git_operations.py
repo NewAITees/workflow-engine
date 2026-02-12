@@ -83,19 +83,13 @@ class GitOperations:
         """Clone the repository or pull if it exists."""
         if self.workspace.exists():
             logger.info(f"Updating existing workspace: {self.workspace}")
-            # Detect and checkout the default branch
             default_branch = self.get_default_branch()
-            self._run(["fetch", "origin"], check=False)
-            self._run(["checkout", default_branch], check=False)
-            self._run(["reset", "--hard", f"origin/{default_branch}"])
-            self._run(["clean", "-fd"])
-            return self._run(["pull"])
-        else:
-            logger.info(f"Cloning repository to: {self.workspace}")
-            return self._run(
-                ["clone", f"https://github.com/{self.repo}.git", str(self.workspace)],
-                cwd=self.work_base,
-            )
+            return self.ensure_branch_up_to_date(default_branch)
+        logger.info(f"Cloning repository to: {self.workspace}")
+        return self._run(
+            ["clone", f"https://github.com/{self.repo}.git", str(self.workspace)],
+            cwd=self.work_base,
+        )
 
     def get_default_branch(self) -> str:
         """Get the default branch name (main or master)."""
@@ -110,9 +104,9 @@ class GitOperations:
         """Create and checkout a new branch."""
         default_branch = self.get_default_branch()
 
-        # Ensure we're on the default branch first
-        self._run(["checkout", default_branch])
-        self._run(["pull"])
+        ensure_result = self.ensure_branch_up_to_date(default_branch)
+        if not ensure_result.success:
+            return ensure_result
 
         # Delete branch if it exists locally
         self._run(["branch", "-D", branch_name], check=False)
@@ -127,13 +121,11 @@ class GitOperations:
         Falls back to creating a fresh branch from default branch when
         the remote branch does not exist.
         """
-        self._run(["fetch", "origin"], check=False)
         remote_ref = f"origin/{branch_name}"
         remote_exists = self._run(["rev-parse", "--verify", remote_ref], check=False)
 
         if remote_exists.success:
-            # Re-anchor local branch to the PR head tip to avoid stale/main divergence.
-            return self._run(["checkout", "-B", branch_name, remote_ref])
+            return self.ensure_branch_up_to_date(branch_name)
 
         return self.create_branch(branch_name)
 
@@ -196,6 +188,34 @@ class GitOperations:
             return self._run(["worktree", "add", "-b", branch, str(path), base_branch])
         # git worktree add <path> <branch>
         return self._run(["worktree", "add", str(path), branch])
+
+    def ensure_branch_up_to_date(self, branch: str) -> GitResult:
+        """Ensure the local branch tracks and matches origin/<branch>."""
+        fetch_result = self._run(["fetch", "origin"], check=False)
+        if not fetch_result.success:
+            return fetch_result
+
+        checkout_result = self._run(["checkout", branch], check=False)
+        if not checkout_result.success:
+            remote_ref = f"origin/{branch}"
+            checkout_result = self._run(
+                ["checkout", "-B", branch, remote_ref], check=False
+            )
+            if not checkout_result.success:
+                return checkout_result
+
+        reset_result = self._run(
+            [
+                "reset",
+                "--hard",
+                f"origin/{branch}",
+            ]
+        )
+        if not reset_result.success:
+            return reset_result
+
+        clean_result = self._run(["clean", "-fd"])
+        return clean_result
 
     def worktree_remove(self, path: Path) -> GitResult:
         """Remove a worktree."""

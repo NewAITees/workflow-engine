@@ -115,20 +115,19 @@ class TestGitOperations:
 
         assert branch == "main"  # Fallback
 
-    @patch.object(GitOperations, "_run")
+    @patch.object(GitOperations, "ensure_branch_up_to_date")
     @patch.object(GitOperations, "get_default_branch")
-    def test_clone_or_pull_existing_repo(self, mock_default_branch, mock_run):
+    def test_clone_or_pull_existing_repo(self, mock_default_branch, mock_ensure):
         """Test updating existing repository."""
         mock_default_branch.return_value = "main"
-        mock_run.return_value = GitResult(success=True, output="Already up to date.")
+        mock_ensure.return_value = GitResult(success=True, output="synced")
 
         # Simulate existing workspace
         with patch.object(Path, "exists", return_value=True):
             result = self.git.clone_or_pull()
 
         assert result.success is True
-        # Should have called fetch, checkout, reset, clean, pull
-        assert mock_run.call_count >= 4
+        mock_ensure.assert_called_once_with("main")
 
     @patch.object(GitOperations, "_run")
     def test_clone_or_pull_new_repo(self, mock_run):
@@ -143,6 +142,44 @@ class TestGitOperations:
         # Should have called clone
         call_args = mock_run.call_args_list[-1]
         assert "clone" in call_args[0][0]
+
+    @patch.object(GitOperations, "_run")
+    def test_ensure_branch_up_to_date_success(self, mock_run):
+        """Ensure branch syncs when checkout succeeds."""
+        mock_run.side_effect = [
+            GitResult(success=True, output="fetched"),  # fetch origin
+            GitResult(success=True, output="checked out"),  # checkout branch
+            GitResult(success=True, output="reset"),  # reset to origin
+            GitResult(success=True, output="clean"),  # clean workspace
+        ]
+
+        result = self.git.ensure_branch_up_to_date("main")
+
+        assert result.success is True
+        assert mock_run.call_args_list[0][0][0] == ["fetch", "origin"]
+        assert mock_run.call_args_list[3][0][0] == ["clean", "-fd"]
+
+    @patch.object(GitOperations, "_run")
+    def test_ensure_branch_up_to_date_checkout_retry(self, mock_run):
+        """Ensure branch sync retries with checkout -B if needed."""
+        mock_run.side_effect = [
+            GitResult(success=True, output="fetched"),  # fetch origin
+            GitResult(success=False, output="", error="no branch"),  # checkout branch
+            GitResult(success=True, output="checked out -B"),  # checkout -B
+            GitResult(success=True, output="reset"),  # reset to origin
+            GitResult(success=True, output="clean"),  # clean workspace
+        ]
+
+        result = self.git.ensure_branch_up_to_date("feature")
+
+        assert result.success is True
+        assert mock_run.call_args_list[1][0][0] == ["checkout", "feature"]
+        assert mock_run.call_args_list[2][0][0] == [
+            "checkout",
+            "-B",
+            "feature",
+            "origin/feature",
+        ]
 
     @patch.object(GitOperations, "_run")
     def test_commit_no_changes(self, mock_run):
@@ -173,24 +210,24 @@ class TestGitOperations:
 
         assert result.success is True
 
+    @patch.object(GitOperations, "ensure_branch_up_to_date")
     @patch.object(GitOperations, "_run")
-    def test_checkout_branch_from_remote_existing(self, mock_run):
+    def test_checkout_branch_from_remote_existing(self, mock_run, mock_ensure):
         """Checkout should track remote branch when it exists."""
-        mock_run.side_effect = [
-            GitResult(success=True, output=""),  # fetch origin
-            GitResult(success=True, output="origin/feature\n"),  # rev-parse verify
-            GitResult(success=True, output=""),  # checkout -B feature origin/feature
-        ]
+        mock_run.return_value = GitResult(
+            success=True, output="origin/feature\n"
+        )  # rev-parse verify
+        mock_ensure.return_value = GitResult(success=True, output="synced")
 
         result = self.git.checkout_branch_from_remote("feature")
 
         assert result.success is True
-        assert mock_run.call_args_list[2][0][0] == [
-            "checkout",
-            "-B",
-            "feature",
+        assert mock_run.call_args_list[0][0][0] == [
+            "rev-parse",
+            "--verify",
             "origin/feature",
         ]
+        mock_ensure.assert_called_once_with("feature")
 
     @patch.object(GitOperations, "create_branch")
     @patch.object(GitOperations, "_run")
@@ -198,10 +235,9 @@ class TestGitOperations:
         self, mock_run, mock_create
     ):
         """Checkout should create new branch when remote branch does not exist."""
-        mock_run.side_effect = [
-            GitResult(success=True, output=""),  # fetch origin
-            GitResult(success=False, output="", error="not found"),  # rev-parse
-        ]
+        mock_run.return_value = GitResult(
+            success=False, output="", error="not found"
+        )  # rev-parse fails
         mock_create.return_value = GitResult(success=True, output="created")
 
         result = self.git.checkout_branch_from_remote("feature")
