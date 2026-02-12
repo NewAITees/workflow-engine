@@ -79,10 +79,23 @@ class GitOperations:
         except subprocess.CalledProcessError as e:
             return GitResult(success=False, output=e.stdout or "", error=e.stderr)
 
+    def fetch_origin(self) -> GitResult:
+        """Fetch latest refs from origin.
+
+        This should be called once at the start of each processing run
+        (e.g. before clone_or_pull, or before worktree creation).
+        Other methods like ensure_branch_up_to_date, create_branch, and
+        checkout_branch_from_remote assume refs are already up-to-date.
+        """
+        return self._run(["fetch", "origin"], check=False)
+
     def clone_or_pull(self) -> GitResult:
-        """Clone the repository or pull if it exists."""
+        """Clone the repository or fetch+sync if it exists."""
         if self.workspace.exists():
             logger.info(f"Updating existing workspace: {self.workspace}")
+            fetch_result = self.fetch_origin()
+            if not fetch_result.success:
+                return fetch_result
             default_branch = self.get_default_branch()
             return self.ensure_branch_up_to_date(default_branch)
         logger.info(f"Cloning repository to: {self.workspace}")
@@ -101,7 +114,10 @@ class GitOperations:
         return "main"
 
     def create_branch(self, branch_name: str) -> GitResult:
-        """Create and checkout a new branch."""
+        """Create and checkout a new branch from the default branch.
+
+        Assumes fetch_origin() has been called (e.g. via clone_or_pull()).
+        """
         default_branch = self.get_default_branch()
 
         ensure_result = self.ensure_branch_up_to_date(default_branch)
@@ -120,6 +136,8 @@ class GitOperations:
 
         Falls back to creating a fresh branch from default branch when
         the remote branch does not exist.
+
+        Assumes fetch_origin() has been called (e.g. via clone_or_pull()).
         """
         remote_ref = f"origin/{branch_name}"
         remote_exists = self._run(["rev-parse", "--verify", remote_ref], check=False)
@@ -190,11 +208,10 @@ class GitOperations:
         return self._run(["worktree", "add", str(path), branch])
 
     def ensure_branch_up_to_date(self, branch: str) -> GitResult:
-        """Ensure the local branch tracks and matches origin/<branch>."""
-        fetch_result = self._run(["fetch", "origin"], check=False)
-        if not fetch_result.success:
-            return fetch_result
+        """Ensure the local branch tracks and matches origin/<branch>.
 
+        Assumes fetch_origin() has been called beforehand.
+        """
         checkout_result = self._run(["checkout", branch], check=False)
         if not checkout_result.success:
             remote_ref = f"origin/{branch}"

@@ -116,10 +116,14 @@ class TestGitOperations:
         assert branch == "main"  # Fallback
 
     @patch.object(GitOperations, "ensure_branch_up_to_date")
+    @patch.object(GitOperations, "fetch_origin")
     @patch.object(GitOperations, "get_default_branch")
-    def test_clone_or_pull_existing_repo(self, mock_default_branch, mock_ensure):
+    def test_clone_or_pull_existing_repo(
+        self, mock_default_branch, mock_fetch, mock_ensure
+    ):
         """Test updating existing repository."""
         mock_default_branch.return_value = "main"
+        mock_fetch.return_value = GitResult(success=True, output="fetched")
         mock_ensure.return_value = GitResult(success=True, output="synced")
 
         # Simulate existing workspace
@@ -127,6 +131,7 @@ class TestGitOperations:
             result = self.git.clone_or_pull()
 
         assert result.success is True
+        mock_fetch.assert_called_once()
         mock_ensure.assert_called_once_with("main")
 
     @patch.object(GitOperations, "_run")
@@ -145,9 +150,8 @@ class TestGitOperations:
 
     @patch.object(GitOperations, "_run")
     def test_ensure_branch_up_to_date_success(self, mock_run):
-        """Ensure branch syncs when checkout succeeds."""
+        """Ensure branch syncs when checkout succeeds (fetch already done)."""
         mock_run.side_effect = [
-            GitResult(success=True, output="fetched"),  # fetch origin
             GitResult(success=True, output="checked out"),  # checkout branch
             GitResult(success=True, output="reset"),  # reset to origin
             GitResult(success=True, output="clean"),  # clean workspace
@@ -156,14 +160,13 @@ class TestGitOperations:
         result = self.git.ensure_branch_up_to_date("main")
 
         assert result.success is True
-        assert mock_run.call_args_list[0][0][0] == ["fetch", "origin"]
-        assert mock_run.call_args_list[3][0][0] == ["clean", "-fd"]
+        assert mock_run.call_args_list[0][0][0] == ["checkout", "main"]
+        assert mock_run.call_args_list[2][0][0] == ["clean", "-fd"]
 
     @patch.object(GitOperations, "_run")
     def test_ensure_branch_up_to_date_checkout_retry(self, mock_run):
-        """Ensure branch sync retries with checkout -B if needed."""
+        """Ensure branch sync retries with checkout -B if needed (fetch already done)."""
         mock_run.side_effect = [
-            GitResult(success=True, output="fetched"),  # fetch origin
             GitResult(success=False, output="", error="no branch"),  # checkout branch
             GitResult(success=True, output="checked out -B"),  # checkout -B
             GitResult(success=True, output="reset"),  # reset to origin
@@ -173,8 +176,8 @@ class TestGitOperations:
         result = self.git.ensure_branch_up_to_date("feature")
 
         assert result.success is True
-        assert mock_run.call_args_list[1][0][0] == ["checkout", "feature"]
-        assert mock_run.call_args_list[2][0][0] == [
+        assert mock_run.call_args_list[0][0][0] == ["checkout", "feature"]
+        assert mock_run.call_args_list[1][0][0] == [
             "checkout",
             "-B",
             "feature",

@@ -72,6 +72,11 @@ class WorkspaceManager:
             # If remove failed or it wasn't a worktree but a dir, force remove dir?
             # Git worktree remove should handle cleaning the entry.
 
+        # Fetch once before any branch sync / worktree creation
+        fetch_result = self.main_git.fetch_origin()
+        if not fetch_result.success:
+            raise RuntimeError(f"Failed to fetch origin: {fetch_result.error}")
+
         def add_wrapped(create_flag: bool) -> GitResult:
             sync_result = self.main_git.ensure_branch_up_to_date(base_branch)
             if not sync_result.success:
