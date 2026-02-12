@@ -108,7 +108,9 @@ def worker_agent(monkeypatch, tmp_path: Path) -> WorkerAgent:
     return agent
 
 
-def test_planner_create_spec_starts_with_spec_review(planner_agent: PlannerAgent) -> None:
+def test_planner_create_spec_starts_with_spec_review(
+    planner_agent: PlannerAgent,
+) -> None:
     """Planner-created issues must start at status:spec-review, not status:ready."""
     planner_agent.llm.create_spec.return_value = MagicMock(
         success=True,
@@ -205,7 +207,9 @@ def test_reviewer_spec_review_ok_transitions_to_ready(
 
     assert reviewer_agent._try_review_spec_issue(issue) is True
 
-    reviewer_agent.github.remove_label.assert_any_call(issue.number, "status:spec-review")
+    reviewer_agent.github.remove_label.assert_any_call(
+        issue.number, "status:spec-review"
+    )
     reviewer_agent.github.add_label.assert_any_call(issue.number, "status:ready")
     combined_comments = "\n".join(
         str(call.args[1]) for call in reviewer_agent.github.comment_issue.call_args_list

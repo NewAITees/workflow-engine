@@ -151,7 +151,9 @@ class ReviewerAgent:
             try:
                 review_data = json.loads(review_result.output)
             except json.JSONDecodeError as exc:
-                raise RuntimeError("Failed to parse spec review result as JSON") from exc
+                raise RuntimeError(
+                    "Failed to parse spec review result as JSON"
+                ) from exc
 
             decision = str(review_data.get("decision", "")).strip().lower()
             summary = str(review_data.get("summary", "")).strip()
@@ -182,7 +184,9 @@ class ReviewerAgent:
                         issue_lines.append(f"{idx}. [{severity}] {description}")
 
             findings_block = (
-                "\n".join(issue_lines) if issue_lines else "1. [UNSPECIFIED] Details omitted."
+                "\n".join(issue_lines)
+                if issue_lines
+                else "1. [UNSPECIFIED] Details omitted."
             )
             self.github.comment_issue(
                 issue.number,
