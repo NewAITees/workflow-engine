@@ -1,6 +1,7 @@
 """Tests for Planner escalation loop logic."""
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -361,3 +362,59 @@ class TestPlannerAgent:
         )
         agent._try_process_escalated_issue.assert_any_call(10, issue=escalated_issue)
         agent._try_process_escalated_issue.assert_any_call(20, issue=failed_issue)
+
+    @patch("planner_main.LLMClient")
+    @patch("planner_main.GitHubClient")
+    @patch("planner_main.get_agent_config")
+    def test_collect_escalation_feedback_prefers_action_pack(
+        self, mock_config, mock_github, mock_llm
+    ) -> None:
+        mock_config.return_value = MagicMock(
+            gh_cli="gh", llm_backend="codex", poll_interval=30
+        )
+        mock_llm.return_value.create_spec.return_value = MagicMock(
+            success=True, output="ignored"
+        )
+        agent = PlannerAgent("owner/repo")
+
+        payload = {
+            "schema_version": "1.0",
+            "task": {
+                "repo": "owner/repo",
+                "issue_number": 9,
+                "attempt": 1,
+                "agent": "worker-a",
+            },
+            "phase": "quality",
+            "status": "failed",
+            "checks": [],
+            "blockers": [{"type": "lint", "message": "unused import"}],
+            "actions": [
+                {
+                    "id": "fix-lint",
+                    "priority": "high",
+                    "title": "Fix ruff lint errors",
+                    "command_or_step": "uv run ruff check . --fix",
+                    "expected_outcome": "ruff exits with 0",
+                }
+            ],
+            "summary": "失敗数: 1 / 主因: lint / 影響範囲: worker-agent / 推奨次アクション: Fix ruff lint errors",
+        }
+        comments = [
+            {
+                "body": (
+                    "ESCALATION:worker\n"
+                    "Action Pack:\n"
+                    "```json\n"
+                    f"{json.dumps(payload, ensure_ascii=False)}\n"
+                    "```\n\n" + ("raw log line\n" * 300)
+                ),
+                "created_at": "2026-02-10T10:00:00Z",
+            }
+        ]
+
+        feedback = agent._collect_escalation_feedback(comments)
+
+        assert "失敗数: 1" in feedback
+        assert "Fix ruff lint errors" in feedback
+        assert "raw log line" not in feedback

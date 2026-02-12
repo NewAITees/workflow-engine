@@ -6,6 +6,7 @@ GitHub issues for the Worker Agent to implement.
 """
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -320,8 +321,54 @@ class PlannerAgent:
         for comment in comments:
             body = str(comment.get("body", "")).strip()
             if pattern.search(body):
-                parts.append(body)
+                action_pack_feedback = self._extract_action_pack_feedback(body)
+                parts.append(action_pack_feedback or body)
         return "\n\n---\n\n".join(parts[-5:]) if parts else "No escalation feedback."
+
+    def _extract_action_pack_feedback(self, body: str) -> str | None:
+        """Extract compact planner feedback from Action Pack JSON in escalation body."""
+        pattern = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+        match = pattern.search(body)
+        if not match:
+            return None
+
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("schema_version") != "1.0":
+            return None
+
+        summary = str(payload.get("summary", "")).strip() or "summary unavailable"
+        blockers = payload.get("blockers", [])
+        actions = payload.get("actions", [])
+        blocker_lines = []
+        if isinstance(blockers, list):
+            for blocker in blockers[:3]:
+                if isinstance(blocker, dict):
+                    blocker_lines.append(
+                        f"- {blocker.get('type', 'blocker')}: {blocker.get('message', '')}"
+                    )
+
+        action_lines = []
+        if isinstance(actions, list):
+            for action in actions[:3]:
+                if isinstance(action, dict):
+                    action_lines.append(
+                        f"- {action.get('title', '')}: {action.get('command_or_step', '')}"
+                    )
+
+        lines = ["ESCALATION:worker", f"Action Pack Summary: {summary}"]
+        if blocker_lines:
+            lines.append("Blockers:")
+            lines.extend(blocker_lines)
+        if action_lines:
+            lines.append("Actions:")
+            lines.extend(action_lines)
+        return "\n".join(lines)
 
     def _create_failed_issue_escalation(
         self, issue: Issue, comments: list[dict]
