@@ -199,9 +199,14 @@ def test_tool_parsers_return_normalized_check_shape(
     parsed = _call_with_known_kwargs(parser, sample_output, exit_code=exit_code)
     check = _as_check(parsed)
 
-    assert {"name", "exit_code", "result", "error_type", "primary_message", "evidence"}.issubset(
-        set(check.keys())
-    )
+    assert {
+        "name",
+        "exit_code",
+        "result",
+        "error_type",
+        "primary_message",
+        "evidence",
+    }.issubset(set(check.keys()))
 
 
 def test_empty_tool_output_sets_no_output_message_and_truncates_evidence():
@@ -291,7 +296,9 @@ def test_generate_actions_for_lint_failure_contains_fix_command():
     )
 
     assert actions
-    assert any("ruff check . --fix" in str(item.get("command_or_step", "")) for item in actions)
+    assert any(
+        "ruff check . --fix" in str(item.get("command_or_step", "")) for item in actions
+    )
 
 
 @patch("planner_main.LLMClient")
@@ -397,13 +404,17 @@ def test_worker_no_op_commit_does_not_mark_failed_or_escalate(
     agent._issue_workspace = MagicMock(return_value=nullcontext(issue_git))
     agent._snapshot_test_files = MagicMock(return_value=set())
     agent._ensure_issue_test_file = MagicMock(return_value=None)
-    agent.llm.generate_tests = MagicMock(return_value=LLMResult(success=True, output="ok"))
+    agent.llm.generate_tests = MagicMock(
+        return_value=LLMResult(success=True, output="ok")
+    )
     agent.llm.generate_implementation = MagicMock(
         return_value=LLMResult(success=True, output="ok")
     )
     agent.git.cleanup_branch = MagicMock()
 
-    issue = Issue(number=33, title="No-op issue", body="Long enough spec " * 20, labels=[])
+    issue = Issue(
+        number=33, title="No-op issue", body="Long enough spec " * 20, labels=[]
+    )
 
     agent._try_process_issue(issue)
 

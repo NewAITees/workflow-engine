@@ -69,8 +69,8 @@ def _truncate(value: str, limit: int) -> str:
     return value[: limit - 3] + "..."
 
 
-def _normalize_primary_message(output: str) -> str:
-    text = output.strip()
+def _normalize_primary_message(output: object) -> str:
+    text = str(output or "").strip()
     if not text:
         return "no output"
     first_line = text.splitlines()[0].strip()
@@ -84,17 +84,31 @@ def _result_from_exit_code(exit_code: int) -> str:
 def _base_check(
     name: str,
     exit_code: int,
-    output: str,
+    output: object,
     error_type: str,
     max_evidence_chars: int,
 ) -> CheckResult:
+    text_output = str(output or "")
     return {
         "name": name,
         "exit_code": int(exit_code),
         "result": _result_from_exit_code(int(exit_code)),
         "error_type": "none" if exit_code == 0 else error_type,
         "primary_message": _normalize_primary_message(output),
-        "evidence": _truncate(output or "", max_evidence_chars),
+        "evidence": _truncate(text_output, max_evidence_chars),
+    }
+
+
+def _unknown_check(
+    name: str, raw_output: object, max_evidence_chars: int, error: Exception
+) -> CheckResult:
+    return {
+        "name": name,
+        "exit_code": -1,
+        "result": "unknown",
+        "error_type": "parse_error",
+        "primary_message": "failed to parse tool output",
+        "evidence": _truncate(f"{raw_output}\n{error}", max_evidence_chars),
     }
 
 
@@ -104,7 +118,10 @@ def parse_ruff_output(
     max_evidence_chars: int = EVIDENCE_MAX_CHARS,
 ) -> CheckResult:
     """Normalize ruff output."""
-    return _base_check("ruff", exit_code, raw_output, "lint", max_evidence_chars)
+    try:
+        return _base_check("ruff", exit_code, raw_output, "lint", max_evidence_chars)
+    except Exception as exc:
+        return _unknown_check("ruff", raw_output, max_evidence_chars, exc)
 
 
 def parse_mypy_output(
@@ -113,7 +130,10 @@ def parse_mypy_output(
     max_evidence_chars: int = EVIDENCE_MAX_CHARS,
 ) -> CheckResult:
     """Normalize mypy output."""
-    return _base_check("mypy", exit_code, raw_output, "type", max_evidence_chars)
+    try:
+        return _base_check("mypy", exit_code, raw_output, "type", max_evidence_chars)
+    except Exception as exc:
+        return _unknown_check("mypy", raw_output, max_evidence_chars, exc)
 
 
 def parse_pytest_output(
@@ -122,7 +142,10 @@ def parse_pytest_output(
     max_evidence_chars: int = EVIDENCE_MAX_CHARS,
 ) -> CheckResult:
     """Normalize pytest output."""
-    return _base_check("pytest", exit_code, raw_output, "test", max_evidence_chars)
+    try:
+        return _base_check("pytest", exit_code, raw_output, "test", max_evidence_chars)
+    except Exception as exc:
+        return _unknown_check("pytest", raw_output, max_evidence_chars, exc)
 
 
 def classify_commit_result(success: bool, output: str = "", error: str = "") -> Status:

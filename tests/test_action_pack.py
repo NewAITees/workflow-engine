@@ -89,3 +89,26 @@ def test_commit_no_changes_is_no_op() -> None:
 def test_generate_actions_for_lint_includes_fix_command() -> None:
     actions = generate_actions([parse_ruff_output("x.py:1:1 F401", 1)])
     assert any("ruff check . --fix" in action["command_or_step"] for action in actions)
+
+
+def test_parser_failure_returns_unknown_without_exception() -> None:
+    check = parse_ruff_output("line", "bad")  # type: ignore[arg-type]
+    assert check["result"] == "unknown"
+    assert check["error_type"] == "parse_error"
+
+
+def test_build_action_pack_records_blocker_for_malformed_check() -> None:
+    pack = build_action_pack(
+        task={
+            "repo": "owner/repo",
+            "issue_number": 33,
+            "attempt": 1,
+            "agent": "worker",
+        },
+        phase="quality",
+        status="failed",
+        checks=[{"name": "ruff"}],  # type: ignore[list-item]
+        blockers=[],
+    )
+    assert pack["checks"][0]["result"] == "unknown"
+    assert any(blocker.get("type") == "parse_error" for blocker in pack["blockers"])
