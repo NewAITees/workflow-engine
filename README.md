@@ -1,4 +1,5 @@
 # AI Workflow Engine
+
 [![CI](https://github.com/NewAITees/workflow-engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NewAITees/workflow-engine/actions/workflows/ci.yml)
 
 GitHubをメッセージキューとして使用する、3エージェント構成の自律型開発ワークフローエンジン。
@@ -55,6 +56,7 @@ Worker Agentは厳格なTDDプロセスに従います：
 5. **全テストパス後にPR作成**: テストが通るまでPRを作成しない
 
 **メリット:**
+
 - コード品質の自動保証
 - レビューサイクルの削減
 - バグの早期発見
@@ -70,6 +72,7 @@ Worker Agentは厳格なTDDプロセスに従います：
 4. **担当者の可視化**: ACKコメントでどのエージェントが処理中か確認可能
 
 **ユースケース:**
+
 - Workerクラッシュ時に別のWorkerが自動再開
 - 長時間停滞しているタスクの自動再取得
 - 複数Workerの並行稼働
@@ -84,12 +87,14 @@ PR作成後、Worker AgentはCI状態を監視し、失敗時に自動で修正�
 4. **失敗時の処理**: 全リトライ失敗時は`status:ci-failed`ラベルを付与して通知
 
 **メリット:**
+
 - CI失敗の手動対応を削減
 - 高速な反復サイクル
 - CI logsをLLMに渡して文脈を提供
 - ラベルとコメントで明確な失敗追跡
 
 **設定:**
+
 - `MAX_CI_RETRIES`: 自動修正試行回数（デフォルト: 3回）
 - `CI_WAIT_TIMEOUT`: CI待機タイムアウト（デフォルト: 10分）
 - `CI_CHECK_INTERVAL`: CIポーリング間隔（デフォルト: 30秒）
@@ -137,9 +142,10 @@ cp config/repos.yml.example config/repos.yml
 pipx install .
 
 # 2. エージェント実行
-workflow-engine planner owner/repo --story "..."
-workflow-engine worker owner/repo --once --verbose
-workflow-engine reviewer owner/repo --once --verbose
+ uv run planner-agent/main.py NewAITees/workflow-engine --daemon --verbose
+uv run worker-agent/main.py NewAITees/workflow-engine --verbose
+uv run reviewer-agent/main.py NewAITees/workflow-engine --verbose
+
 ```
 
 ### 設定ファイルの探索順（CLI）
@@ -194,18 +200,25 @@ repositories:
 はい、その理解で合っています。基本は「Plannerに依頼してIssue化」してから、Worker/Reviewerに回します。
 
 1. Plannerに要望を渡してIssue化する
+
 ```bash
 uv run planner-agent/main.py owner/repo --story "これをIssue化して: ユーザー検索機能を追加"
 ```
+
 2. Workerを起動して `status:ready` Issue を実装させる
+
 ```bash
 uv run worker-agent/main.py owner/repo --verbose
 ```
+
 3. Reviewerを起動して `status:reviewing` PR をレビューさせる
+
 ```bash
 uv run reviewer-agent/main.py owner/repo --verbose
 ```
+
 4. Plannerのエスカレーションループも回す（推奨）
+
 ```bash
 uv run planner-agent/main.py owner/repo --daemon --verbose
 ```
@@ -278,6 +291,7 @@ repositories:
 | `status:failed` | 処理失敗 |
 
 **ラベル遷移フロー:**
+
 ```
 ready → implementing → testing → CI監視 → reviewing → in-review → approved
                 ↑           ↓       ↓ (失敗)              ↓
@@ -309,6 +323,7 @@ workflow-engine/
 複数エージェント間の競合を防ぎ、クラッシュからの復旧を可能にするロック機構。
 
 **ロック取得フロー:**
+
 1. **既存ロック確認**: 30分以内のACKコメントがあるかチェック
    - あり → スキップ（他のエージェントが処理中）
    - なし → 次へ
@@ -318,11 +333,13 @@ workflow-engine/
 5. **ラベル遷移実行**: 勝者がラベルを変更
 
 **タイムアウトと復旧:**
+
 - **30分タイムアウト**: ACKから30分経過したロックは無効
 - **自動再開**: 別のエージェントがタイムアウト後に自動取得
 - **エージェントID追跡**: 各エージェントは一意のID（例: `worker-a1b2c3d4`）
 
 **ACKコメント例:**
+
 ```
 ACK:worker:worker-a1b2c3d4:1706123456789
 ```

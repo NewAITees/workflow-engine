@@ -156,22 +156,43 @@ class PlannerAgent:
 
         Returns True if at least one issue was processed.
         """
-        issues = self.github.list_issues(state="open", limit=100)
+        issues = self._list_escalation_candidates(limit=100)
         processed = 0
 
         for issue in issues:
             if processed >= limit:
                 break
-            if self._try_process_escalated_issue(issue.number):
+            if self._try_process_escalated_issue(issue.number, issue=issue):
                 processed += 1
 
         if processed:
             logger.info(f"Processed {processed} escalated issue(s)")
         return processed > 0
 
-    def _try_process_escalated_issue(self, issue_number: int) -> bool:
+    def _list_escalation_candidates(self, limit: int = 100) -> list[Issue]:
+        """
+        List open issues that can require planner re-processing.
+
+        We only need escalated/failed items here; scanning every open issue
+        causes unnecessary API calls in large repositories.
+        """
+        escalated = self.github.list_issues(
+            labels=[self.STATUS_ESCALATED], state="open", limit=limit
+        )
+        failed = self.github.list_issues(
+            labels=[self.STATUS_FAILED], state="open", limit=limit
+        )
+        unique_by_number: dict[int, Issue] = {}
+        for issue in escalated + failed:
+            unique_by_number[issue.number] = issue
+        return list(unique_by_number.values())
+
+    def _try_process_escalated_issue(
+        self, issue_number: int, issue: Issue | None = None
+    ) -> bool:
         """Process a single escalated issue if a new escalation exists."""
-        issue = self.github.get_issue(issue_number)
+        if issue is None:
+            issue = self.github.get_issue(issue_number)
         if issue is None:
             return False
 

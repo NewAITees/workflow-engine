@@ -289,16 +289,17 @@ class WorkerAgent:
 
         default_branch = self.github.get_default_branch()
         worktree_id = f"{self.agent_id}-issue-{issue_number}"
+        worktree_cm = None
+        work_git = None
 
         try:
-            with self.workspace_manager.worktree(
+            worktree_cm = self.workspace_manager.worktree(
                 branch_name,
                 worktree_id,
                 create_branch=True,
                 base_branch=default_branch,
-            ) as work_git:
-                yield work_git
-                return
+            )
+            work_git = worktree_cm.__enter__()
         except Exception as e:
             # Branch may already exist from a previous attempt.
             if "already exists" in str(e):
@@ -307,20 +308,32 @@ class WorkerAgent:
                     "retrying by reusing existing branch."
                 )
                 try:
-                    with self.workspace_manager.worktree(
+                    worktree_cm = self.workspace_manager.worktree(
                         branch_name,
                         worktree_id,
                         create_branch=False,
                         base_branch=default_branch,
-                    ) as work_git:
-                        yield work_git
-                        return
+                    )
+                    work_git = worktree_cm.__enter__()
                 except Exception as retry_error:
                     e = retry_error
-            logger.warning(
-                f"[{self.agent_id}] Worktree setup failed for issue #{issue_number}: {e}. "
-                "Falling back to legacy workspace flow."
-            )
+
+            if work_git is None:
+                logger.warning(
+                    f"[{self.agent_id}] Worktree setup failed for issue #{issue_number}: {e}. "
+                    "Falling back to legacy workspace flow."
+                )
+
+        if work_git is not None and worktree_cm is not None:
+            exc_type = exc_value = exc_tb = None
+            try:
+                yield work_git
+                return
+            except Exception:
+                exc_type, exc_value, exc_tb = sys.exc_info()
+                raise
+            finally:
+                worktree_cm.__exit__(exc_type, exc_value, exc_tb)
 
         clone_result = self.git.clone_or_pull()
         if not clone_result.success:
@@ -405,7 +418,7 @@ class WorkerAgent:
                     )
 
                 # TDD Step 2-4: Implementation with test retry loop
-                test_failure_output = ""
+                validation_failure_output = ""
                 test_passed = False
 
                 while test_retry_count < self.MAX_RETRIES:
@@ -418,9 +431,9 @@ class WorkerAgent:
                     impl_spec = issue.body
                     if test_retry_count > 0:
                         impl_spec += (
-                            f"\n\n## Previous Test Failure (Attempt {test_retry_count})\n"
-                            f"Please fix the implementation to pass the tests.\n\n"
-                            f"```\n{test_failure_output[:2000]}\n```"
+                            f"\n\n## Previous Validation Failure (Attempt {test_retry_count})\n"
+                            "Please fix the implementation to satisfy quality checks and tests.\n\n"
+                            f"```\n{validation_failure_output[:2000]}\n```"
                         )
 
                     # Generate implementation
@@ -443,6 +456,32 @@ class WorkerAgent:
                             f"Implementation commit failed: {impl_commit_result.error}"
                         )
 
+                    # Run quality gate before issue-specific tests
+                    logger.info(
+                        f"[{self.agent_id}] Running quality checks (ruff/mypy)..."
+                    )
+                    quality_passed, quality_output = self._run_quality_checks(
+                        git_path=issue_git.path
+                    )
+                    if not quality_passed:
+                        test_retry_count += 1
+                        validation_failure_output = quality_output
+                        logger.warning(
+                            f"[{self.agent_id}] Quality checks failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
+                        )
+                        self.github.comment_issue(
+                            issue.number,
+                            f"⚠️ **Quality checks failed (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
+                            "Retrying implementation with quality feedback...\n\n"
+                            "<details>\n<summary>Quality output</summary>\n\n"
+                            f"```\n{quality_output[:2000]}\n```\n\n</details>",
+                        )
+                        if test_retry_count >= self.MAX_RETRIES:
+                            raise RuntimeError(
+                                f"Quality checks failed after {self.MAX_RETRIES} attempts:\n{quality_output[:500]}"
+                            )
+                        continue
+
                     # Transition to testing status
                     self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
                     self.github.add_label(issue.number, self.STATUS_TESTING)
@@ -461,7 +500,7 @@ class WorkerAgent:
 
                     # Tests failed - record and retry
                     test_retry_count += 1
-                    test_failure_output = test_output
+                    validation_failure_output = test_output
 
                     logger.warning(
                         f"[{self.agent_id}] Tests failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
@@ -918,7 +957,7 @@ Once clarified, please update the issue and change label from `status:needs-clar
 
             # TDD retry loop with test execution
             test_retry_count = 0
-            test_failure_output = ""
+            validation_failure_output = ""
             test_passed = False
 
             while test_retry_count < self.MAX_RETRIES:
@@ -932,9 +971,9 @@ Once clarified, please update the issue and change label from `status:needs-clar
 
                 if test_retry_count > 0:
                     impl_spec += (
-                        f"\n\n## Test Failure (Attempt {test_retry_count})\n"
-                        f"Please fix the implementation to pass the tests.\n\n"
-                        f"```\n{test_failure_output[:2000]}\n```"
+                        f"\n\n## Validation Failure (Attempt {test_retry_count})\n"
+                        "Please fix the implementation to satisfy quality checks and tests.\n\n"
+                        f"```\n{validation_failure_output[:2000]}\n```"
                     )
 
                 # Generate improved implementation
@@ -961,6 +1000,30 @@ Once clarified, please update the issue and change label from `status:needs-clar
                 if not commit_result.success:
                     raise RuntimeError(f"Commit failed: {commit_result.error}")
 
+                # Run quality gate before issue-specific tests
+                logger.info(f"[{self.agent_id}] Running quality checks (ruff/mypy)...")
+                quality_passed, quality_output = self._run_quality_checks(
+                    git_path=self.git.path
+                )
+                if not quality_passed:
+                    test_retry_count += 1
+                    validation_failure_output = quality_output
+                    logger.warning(
+                        f"[{self.agent_id}] Quality checks failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
+                    )
+                    self.github.comment_pr(
+                        pr.number,
+                        f"⚠️ **Quality checks failed during retry (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
+                        "Retrying implementation with quality feedback...\n\n"
+                        "<details>\n<summary>Quality output</summary>\n\n"
+                        f"```\n{quality_output[:2000]}\n```\n\n</details>",
+                    )
+                    if test_retry_count >= self.MAX_RETRIES:
+                        raise RuntimeError(
+                            f"Quality checks failed after {self.MAX_RETRIES} attempts:\n{quality_output[:500]}"
+                        )
+                    continue
+
                 # Transition to testing status
                 self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
                 self.github.add_pr_label(pr.number, self.STATUS_TESTING)
@@ -979,7 +1042,7 @@ Once clarified, please update the issue and change label from `status:needs-clar
 
                 # Tests failed - record and retry
                 test_retry_count += 1
-                test_failure_output = test_output
+                validation_failure_output = test_output
 
                 logger.warning(
                     f"[{self.agent_id}] Tests failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
@@ -1249,6 +1312,40 @@ Please analyze and fix the CI failures.
             error_msg = f"Test execution error: {str(e)}"
             logger.error(f"[{self.agent_id}] {error_msg}")
             return False, error_msg
+
+    def _run_quality_checks(self, git_path: Path | None = None) -> tuple[bool, str]:
+        """Run repo-wide quality checks before issue-specific tests."""
+        repo_path = git_path or self.git.path
+        checks = [
+            ("ruff", ["uv", "run", "ruff", "check", "."]),
+            ("mypy", ["uv", "run", "mypy", "."]),
+        ]
+        outputs: list[str] = []
+        all_passed = True
+
+        for check_name, cmd in checks:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                outputs.append(
+                    f"{check_name} (exit={result.returncode})\n"
+                    f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+                )
+                if result.returncode != 0:
+                    all_passed = False
+            except subprocess.TimeoutExpired:
+                all_passed = False
+                outputs.append(f"{check_name} timed out after 5 minutes")
+            except Exception as e:
+                all_passed = False
+                outputs.append(f"{check_name} execution error: {e}")
+
+        return all_passed, "\n\n".join(outputs)
 
     def _snapshot_test_files(self, repo_path: Path) -> set[Path]:
         """Collect current test files under tests/."""

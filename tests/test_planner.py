@@ -209,3 +209,47 @@ class TestPlannerAgent:
         agent.github.update_issue_body.assert_called_once_with(
             4, "Revised spec from failed"
         )
+
+    @patch("planner_main.LLMClient")
+    @patch("planner_main.GitHubClient")
+    @patch("planner_main.get_agent_config")
+    def test_process_escalations_scans_only_escalated_and_failed(
+        self, mock_config, mock_github, mock_llm
+    ) -> None:
+        mock_config.return_value = MagicMock(
+            gh_cli="gh", llm_backend="codex", poll_interval=30
+        )
+        mock_llm.return_value.create_spec.return_value = MagicMock(
+            success=True, output="ignored"
+        )
+
+        agent = PlannerAgent("owner/repo")
+        escalated_issue = Issue(
+            number=10,
+            title="Escalated",
+            body="spec",
+            labels=[agent.STATUS_ESCALATED],
+        )
+        failed_issue = Issue(
+            number=20,
+            title="Failed",
+            body="spec",
+            labels=[agent.STATUS_FAILED],
+        )
+        agent.github.list_issues = MagicMock(
+            side_effect=[[escalated_issue], [failed_issue]]
+        )
+        agent._try_process_escalated_issue = MagicMock(side_effect=[False, False])
+
+        result = agent._process_escalations(limit=20)
+
+        assert result is False
+        assert agent.github.list_issues.call_count == 2
+        agent.github.list_issues.assert_any_call(
+            labels=[agent.STATUS_ESCALATED], state="open", limit=100
+        )
+        agent.github.list_issues.assert_any_call(
+            labels=[agent.STATUS_FAILED], state="open", limit=100
+        )
+        agent._try_process_escalated_issue.assert_any_call(10, issue=escalated_issue)
+        agent._try_process_escalated_issue.assert_any_call(20, issue=failed_issue)

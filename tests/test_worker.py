@@ -277,6 +277,48 @@ class TestWorkerAgent:
         agent.git.commit.assert_called_once()
         assert (tests_dir / "test_issue_4.py").exists()
 
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_issue_workspace_does_not_fallback_on_body_exception(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ):
+        """Exception inside worktree usage should propagate without legacy fallback."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+        agent.github = MagicMock()
+        agent.github.get_default_branch.return_value = "main"
+        agent.git.clone_or_pull = MagicMock()
+        agent.git.create_branch = MagicMock()
+
+        work_git = MagicMock()
+        worktree_cm = MagicMock()
+        worktree_cm.__enter__.return_value = work_git
+        worktree_cm.__exit__.return_value = False
+        agent.workspace_manager.worktree = MagicMock(return_value=worktree_cm)
+
+        caught = None
+        try:
+            with agent._issue_workspace(14, "auto/issue-14") as issue_git:
+                assert issue_git == work_git
+                raise RuntimeError("boom")
+        except RuntimeError as e:  # pragma: no cover - explicit assertion below
+            caught = str(e)
+
+        assert caught == "boom"
+        agent.git.clone_or_pull.assert_not_called()
+        agent.git.create_branch.assert_not_called()
+        worktree_cm.__exit__.assert_called_once()
+        assert worktree_cm.__exit__.call_args[0][0] is RuntimeError
+
     @patch("subprocess.run")
     @patch("shared.git_operations.GitOperations")
     @patch("shared.llm_client.LLMClient")
@@ -336,6 +378,68 @@ class TestWorkerAgent:
 
         assert success is False
         assert "Test execution error" in output
+
+    @patch("subprocess.run")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_run_quality_checks_success(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git, mock_run
+    ):
+        """Quality checks should pass when both ruff and mypy succeed."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="ruff ok", stderr=""),
+            MagicMock(returncode=0, stdout="mypy ok", stderr=""),
+        ]
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = MagicMock()
+        agent.git.path = Path("/tmp/test/repo")
+
+        success, output = agent._run_quality_checks()
+
+        assert success is True
+        assert "ruff (exit=0)" in output
+        assert "mypy (exit=0)" in output
+        assert mock_run.call_count == 2
+
+    @patch("subprocess.run")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_run_quality_checks_failure(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git, mock_run
+    ):
+        """Quality checks should fail when any check fails."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout="", stderr="ruff error"),
+            MagicMock(returncode=0, stdout="mypy ok", stderr=""),
+        ]
+
+        agent = WorkerAgent("owner/repo")
+        agent.git = MagicMock()
+        agent.git.path = Path("/tmp/test/repo")
+
+        success, output = agent._run_quality_checks()
+
+        assert success is False
+        assert "ruff (exit=1)" in output
 
     @patch("time.sleep")
     @patch("shared.git_operations.GitOperations")
@@ -1247,6 +1351,7 @@ class TestWorkerAgent:
                 (False, "fail 3"),
             ]
         )
+        agent._run_quality_checks = MagicMock(return_value=(True, "quality ok"))
         agent.llm.generate_tests = MagicMock(
             return_value=LLMResult(success=True, output="tests generated")
         )
