@@ -80,6 +80,7 @@ def test_try_lock_pr_success(mock_time) -> None:
     github.remove_pr_label.return_value = True
     github.add_pr_label.return_value = True
     github.get_issue_comments.side_effect = [[], [{"body": "ACK:worker:agent-1:2000"}]]
+    github.get_pr.return_value = MagicMock(labels=["status:reviewing"])
 
     manager = LockManager(github, "worker", "agent-1")
 
@@ -102,6 +103,26 @@ def test_try_lock_pr_conflict(mock_time) -> None:
     result = manager.try_lock_pr(24, "status:ready", "status:reviewing")
 
     assert result.success is False
+
+
+@patch("shared.lock.time")
+def test_try_lock_pr_verification_failure(mock_time) -> None:
+    mock_time.time.side_effect = [1.0, 2.0]
+    mock_time.sleep.return_value = None
+
+    github = MagicMock()
+    github.comment_pr.return_value = True
+    github.remove_pr_label.return_value = True
+    github.add_pr_label.return_value = True
+    github.get_issue_comments.side_effect = [[], [{"body": "ACK:worker:agent-1:2000"}]]
+    github.get_pr.return_value = MagicMock(labels=["status:ready"])
+
+    manager = LockManager(github, "worker", "agent-1")
+
+    result = manager.try_lock_pr(24, "status:ready", "status:reviewing")
+
+    assert result.success is False
+    assert "not found after transition" in (result.error or "")
 
 
 def test_mark_failed_updates_labels_and_comments() -> None:

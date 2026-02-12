@@ -57,6 +57,8 @@ class WorkerAgent:
     # CI settings
     CI_WAIT_TIMEOUT = 600  # 10 minutes
     CI_CHECK_INTERVAL = 30  # 30 seconds
+    CI_NO_CHECKS_GRACE_SECONDS = 60
+    CI_POST_PUSH_SETTLE_SECONDS = 15
 
     MIN_SPEC_LENGTH = 100
     SPEC_UNCLEAR_KEYWORDS = [
@@ -574,6 +576,7 @@ Closes #{issue.number}
 
                 # Extract PR number from URL
                 pr_number = int(pr_url.split("/")[-1])
+                self.github.add_label(issue.number, self.STATUS_REVIEWING)
 
                 self.github.comment_pr(
                     pr_number,
@@ -654,6 +657,12 @@ Please analyze and fix the CI failures.
                             f"[{self.agent_id}] CI fix push failed: {push_result.error}"
                         )
                         break
+
+                    logger.info(
+                        f"[{self.agent_id}] Waiting {self.CI_POST_PUSH_SETTLE_SECONDS}s "
+                        "for new CI checks to register..."
+                    )
+                    time.sleep(self.CI_POST_PUSH_SETTLE_SECONDS)
 
                     # Wait for CI again
                     logger.info(f"[{self.agent_id}] Waiting for CI after fix...")
@@ -1476,6 +1485,7 @@ Please analyze and fix the CI failures.
         )
 
         elapsed = 0
+        none_elapsed = 0
         while elapsed < timeout:
             ci_status = self.github.get_ci_status(pr_number)
 
@@ -1486,8 +1496,20 @@ Please analyze and fix the CI failures.
                 logger.warning(f"[{self.agent_id}] CI failed on PR #{pr_number}")
                 return False, "failure"
             elif ci_status["status"] == "none":
-                logger.info(f"[{self.agent_id}] No CI configured for PR #{pr_number}")
-                return True, "success"  # No CI means pass
+                none_elapsed += self.CI_CHECK_INTERVAL
+                if none_elapsed >= self.CI_NO_CHECKS_GRACE_SECONDS:
+                    logger.info(
+                        f"[{self.agent_id}] No CI checks detected for "
+                        f"{self.CI_NO_CHECKS_GRACE_SECONDS}s on PR #{pr_number}; "
+                        "treating as no CI configured"
+                    )
+                    return True, "success"
+                logger.debug(
+                    f"[{self.agent_id}] CI checks not registered yet on PR #{pr_number} "
+                    f"(elapsed without checks: {none_elapsed}s)"
+                )
+            else:
+                none_elapsed = 0
 
             # Still pending, wait and check again
             pending_count = ci_status["pending_count"]

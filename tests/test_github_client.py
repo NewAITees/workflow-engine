@@ -258,12 +258,13 @@ class TestGitHubClient:
 
     @patch("subprocess.run")
     def test_get_pr_checks_no_ci(self, mock_run):
-        """Test get_pr_checks returns all_passed when no checks exist."""
+        """Test get_pr_checks distinguishes empty checks as unknown/no-checks."""
         mock_run.return_value = MagicMock(returncode=1, stdout="")
 
         result = self.client.get_pr_checks(1)
 
-        assert result["all_passed"] is True
+        assert result["all_passed"] is False
+        assert result["has_checks"] is False
 
     @patch("subprocess.run")
     def test_get_pr_reviews_filters_invalid_json(self, mock_run):
@@ -280,11 +281,14 @@ class TestGitHubClient:
     @patch("subprocess.run")
     def test_get_ci_status_success(self, mock_run):
         """Test get_ci_status when all checks passed."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"name":"test","status":"completed","conclusion":"success"}\n'
-            '{"name":"lint","status":"completed","conclusion":"success"}\n',
-        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='{"headRefOid":"abc123"}'),
+            MagicMock(
+                returncode=0,
+                stdout='{"name":"test","status":"completed","conclusion":"success"}\n'
+                '{"name":"lint","status":"completed","conclusion":"success"}\n',
+            ),
+        ]
 
         status = self.client.get_ci_status(1)
 
@@ -297,11 +301,14 @@ class TestGitHubClient:
     @patch("subprocess.run")
     def test_get_ci_status_failure(self, mock_run):
         """Test get_ci_status when some checks failed."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"name":"test","status":"completed","conclusion":"failure"}\n'
-            '{"name":"lint","status":"completed","conclusion":"success"}\n',
-        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='{"headRefOid":"abc123"}'),
+            MagicMock(
+                returncode=0,
+                stdout='{"name":"test","status":"completed","conclusion":"failure"}\n'
+                '{"name":"lint","status":"completed","conclusion":"success"}\n',
+            ),
+        ]
 
         status = self.client.get_ci_status(1)
 
@@ -313,11 +320,14 @@ class TestGitHubClient:
     @patch("subprocess.run")
     def test_get_ci_status_pending(self, mock_run):
         """Test get_ci_status when checks are pending."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"name":"test","status":"in_progress","conclusion":null}\n'
-            '{"name":"lint","status":"completed","conclusion":"success"}\n',
-        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='{"headRefOid":"abc123"}'),
+            MagicMock(
+                returncode=0,
+                stdout='{"name":"test","status":"in_progress","conclusion":null}\n'
+                '{"name":"lint","status":"completed","conclusion":"success"}\n',
+            ),
+        ]
 
         status = self.client.get_ci_status(1)
 
@@ -328,7 +338,7 @@ class TestGitHubClient:
     @patch("subprocess.run")
     def test_get_ci_status_no_checks(self, mock_run):
         """Test get_ci_status when no CI configured."""
-        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        mock_run.side_effect = [MagicMock(returncode=1, stdout="")]
 
         status = self.client.get_ci_status(1)
 
@@ -339,11 +349,14 @@ class TestGitHubClient:
     @patch("subprocess.run")
     def test_get_ci_logs_with_failures(self, mock_run):
         """Test get_ci_logs returns failed check details."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"name":"test","conclusion":"failure","html_url":"https://example.com",'
-            '"output":{"title":"Test failed","summary":"Error details"}}\n',
-        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='{"headRefOid":"abc123"}'),
+            MagicMock(
+                returncode=0,
+                stdout='{"name":"test","conclusion":"failure","html_url":"https://example.com",'
+                '"output":{"title":"Test failed","summary":"Error details"}}\n',
+            ),
+        ]
 
         logs = self.client.get_ci_logs(1)
 
@@ -355,7 +368,7 @@ class TestGitHubClient:
     @patch("subprocess.run")
     def test_get_ci_logs_no_failures(self, mock_run):
         """Test get_ci_logs returns empty when no failures."""
-        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        mock_run.side_effect = [MagicMock(returncode=1, stdout="")]
 
         logs = self.client.get_ci_logs(1)
 
@@ -364,8 +377,20 @@ class TestGitHubClient:
     @patch("subprocess.run")
     def test_get_ci_logs_invalid_json(self, mock_run):
         """Test get_ci_logs handles invalid JSON gracefully."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="invalid json\n")
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='{"headRefOid":"abc123"}'),
+            MagicMock(returncode=0, stdout="invalid json\n"),
+        ]
 
         logs = self.client.get_ci_logs(1)
 
         assert logs == []
+
+    @patch("subprocess.run")
+    def test_get_pr_head_sha_success(self, mock_run):
+        """Test get_pr_head_sha returns commit sha when available."""
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"headRefOid":"deadbeef"}')
+
+        sha = self.client.get_pr_head_sha(123)
+
+        assert sha == "deadbeef"
