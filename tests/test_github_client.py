@@ -389,7 +389,9 @@ class TestGitHubClient:
     @patch("subprocess.run")
     def test_get_pr_head_sha_success(self, mock_run):
         """Test get_pr_head_sha returns commit sha when available."""
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"headRefOid":"deadbeef"}')
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='{"headRefOid":"deadbeef"}'
+        )
 
         sha = self.client.get_pr_head_sha(123)
 
