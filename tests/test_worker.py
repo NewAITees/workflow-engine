@@ -1184,7 +1184,76 @@ class TestWorkerAgent:
         assert recovered is False
         agent.github.remove_label.assert_not_called()
         agent.github.add_label.assert_not_called()
-        agent.github.comment_issue.assert_not_called()
+
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_try_process_issue_treats_no_changes_commit_as_no_op(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git
+    ) -> None:
+        """No-op implementation commit should not be treated as hard failure."""
+        from shared.llm_client import LLMResult
+
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+        agent.lock.try_lock_issue = MagicMock(return_value=MagicMock(success=True))
+        agent.lock.mark_failed = MagicMock()
+        agent._comment_worker_escalation = MagicMock()
+        agent._snapshot_test_files = MagicMock(return_value=set())
+        agent._ensure_issue_test_file = MagicMock(return_value=None)
+        agent._issue_workspace = MagicMock(
+            return_value=nullcontext(
+                MagicMock(
+                    path=Path("/tmp/test/repo"),
+                    commit=MagicMock(
+                        side_effect=[
+                            MagicMock(success=True, output="tests committed"),
+                            MagicMock(
+                                success=False, output="", error="No changes to commit"
+                            ),
+                        ]
+                    ),
+                    push=MagicMock(success=True, output=""),
+                )
+            )
+        )
+        agent.llm.generate_tests = MagicMock(
+            return_value=LLMResult(success=True, output="ok")
+        )
+        agent.llm.generate_implementation = MagicMock(
+            return_value=LLMResult(success=True, output="ok")
+        )
+        agent._run_quality_checks = MagicMock(return_value=(True, "ok"))
+        agent._run_tests = MagicMock(return_value=(True, "ok"))
+        agent.github.remove_label = MagicMock(return_value=True)
+        agent.github.add_label = MagicMock(return_value=True)
+        agent.github.get_default_branch = MagicMock(return_value="main")
+        agent.github.create_pr = MagicMock(
+            return_value="https://github.com/owner/repo/pull/7"
+        )
+        agent.github.comment_issue = MagicMock(return_value=True)
+        agent.github.comment_pr = MagicMock(return_value=True)
+        agent._wait_for_ci = MagicMock(return_value=(True, "success"))
+
+        issue = Issue(
+            number=33,
+            title="No-op issue",
+            body="Long enough spec " * 20,
+            labels=[],
+        )
+        result = agent._try_process_issue(issue)
+
+        assert result is False
+        agent.lock.mark_failed.assert_not_called()
+        agent._comment_worker_escalation.assert_not_called()
 
     @patch("shared.git_operations.GitOperations")
     @patch("shared.llm_client.LLMClient")

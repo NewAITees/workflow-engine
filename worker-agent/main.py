@@ -6,6 +6,7 @@ implements them using the configured LLM backend (codex or claude).
 """
 
 import argparse
+import json
 import logging
 import re
 import subprocess
@@ -20,6 +21,14 @@ from pathlib import Path
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from shared.action_pack import (
+    ActionPack,
+    build_action_pack,
+    classify_commit_result,
+    parse_mypy_output,
+    parse_pytest_output,
+    parse_ruff_output,
+)
 from shared.config import get_agent_config
 from shared.git_operations import GitOperations
 from shared.github_client import GitHubClient, Issue, PullRequest
@@ -86,6 +95,9 @@ class WorkerAgent:
         self.llm = LLMClient(self.config)
         self.git = GitOperations(repo, Path(self.config.work_dir))
         self.workspace_manager = WorkspaceManager(repo, self.git.path)
+        self._latest_quality_action_pack: ActionPack | None = None
+        self._latest_test_action_pack: ActionPack | None = None
+        self._latest_commit_action_pack: ActionPack | None = None
 
         logger.info(f"Worker Agent initialized for {repo}")
         logger.info(f"Agent ID: {self.agent_id}")
@@ -451,17 +463,49 @@ class WorkerAgent:
                     impl_commit_msg = f"feat: implement #{issue.number} (attempt {test_retry_count + 1})\n\n{issue.title}"
                     impl_commit_result = issue_git.commit(impl_commit_msg)
 
-                    if not impl_commit_result.success:
+                    commit_status = classify_commit_result(
+                        impl_commit_result.success,
+                        impl_commit_result.output,
+                        impl_commit_result.error or "",
+                    )
+                    if commit_status == "failed":
                         raise RuntimeError(
                             f"Implementation commit failed: {impl_commit_result.error}"
                         )
+                    if commit_status == "no_op":
+                        commit_check = {
+                            "name": "commit",
+                            "exit_code": 1,
+                            "result": "no_op",
+                            "error_type": "commit_no_changes",
+                            "primary_message": "No changes to commit",
+                            "evidence": "No changes to commit",
+                        }
+                        self._latest_commit_action_pack = build_action_pack(
+                            task=self._build_task_context(
+                                issue.number, attempt=test_retry_count + 1
+                            ),
+                            phase="finalize",
+                            status="no_op",
+                            checks=[commit_check],
+                            blockers=[],
+                        )
+                        self.github.comment_issue(
+                            issue.number,
+                            "ℹ️ **Implementation commit resulted in no-op**\n\n"
+                            f"{self._render_action_pack_comment(self._latest_commit_action_pack)}",
+                        )
+                        self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                        self.github.add_label(issue.number, self.STATUS_READY)
+                        return False
 
                     # Run quality gate before issue-specific tests
                     logger.info(
                         f"[{self.agent_id}] Running quality checks (ruff/mypy)..."
                     )
                     quality_passed, quality_output = self._run_quality_checks(
-                        git_path=issue_git.path
+                        git_path=issue_git.path,
+                        issue_number=issue.number,
                     )
                     if not quality_passed:
                         test_retry_count += 1
@@ -469,12 +513,17 @@ class WorkerAgent:
                         logger.warning(
                             f"[{self.agent_id}] Quality checks failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
                         )
+                        quality_pack = self._latest_quality_action_pack
+                        quality_body = (
+                            self._render_action_pack_comment(quality_pack)
+                            if quality_pack is not None
+                            else quality_output[:2000]
+                        )
                         self.github.comment_issue(
                             issue.number,
                             f"⚠️ **Quality checks failed (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
                             "Retrying implementation with quality feedback...\n\n"
-                            "<details>\n<summary>Quality output</summary>\n\n"
-                            f"```\n{quality_output[:2000]}\n```\n\n</details>",
+                            f"{quality_body}",
                         )
                         if test_retry_count >= self.MAX_RETRIES:
                             raise RuntimeError(
@@ -506,13 +555,18 @@ class WorkerAgent:
                         f"[{self.agent_id}] Tests failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
                     )
 
+                    test_pack = self._latest_test_action_pack
+                    test_body = (
+                        self._render_action_pack_comment(test_pack)
+                        if test_pack is not None
+                        else test_output[:2000]
+                    )
                     # Comment on issue about test failure
                     self.github.comment_issue(
                         issue.number,
                         f"⚠️ **Test failed (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
                         f"Retrying implementation with test feedback...\n\n"
-                        f"<details>\n<summary>Test output</summary>\n\n"
-                        f"```\n{test_output[:2000]}\n```\n\n</details>",
+                        f"{test_body}",
                     )
 
                     if test_retry_count >= self.MAX_RETRIES:
@@ -855,6 +909,47 @@ Once clarified, please update the issue and change label from `status:needs-clar
             f"ESCALATION:worker\n\nReason: {reason}\n\n{details}",
         )
 
+    def _build_task_context(self, issue_number: int, attempt: int = 1) -> dict:
+        """Build Action Pack task context."""
+        return {
+            "repo": self.repo,
+            "issue_number": issue_number,
+            "attempt": attempt,
+            "agent": self.agent_id,
+        }
+
+    def _render_action_pack_comment(self, pack: ActionPack) -> str:
+        """Render compact Action Pack comment body."""
+        lines = [f"Summary: {pack['summary']}"]
+
+        evidence_lines = []
+        for check in pack.get("checks", []):
+            if check.get("result") == "ok":
+                continue
+            evidence = str(check.get("evidence", "")).strip()
+            if evidence:
+                evidence_lines.append(
+                    f"- `{check.get('name', 'check')}`: {evidence[:300]}"
+                )
+        if evidence_lines:
+            lines.append("\nEvidence:")
+            lines.extend(evidence_lines[:2])
+
+        action_lines = []
+        for action in pack.get("actions", []):
+            action_lines.append(
+                f"- {action.get('title')}: {action.get('command_or_step')}"
+            )
+        if action_lines:
+            lines.append("\nNext actions:")
+            lines.extend(action_lines[:3])
+
+        lines.append(
+            "\nAction Pack:\n```json\n"
+            f"{json.dumps(pack, ensure_ascii=False, sort_keys=True)}\n```"
+        )
+        return "\n".join(lines)
+
     def _process_changes_requested_prs(self) -> None:
         """Find and retry PRs with changes requested."""
         prs = self.github.list_prs(labels=[self.STATUS_CHANGES_REQUESTED])
@@ -997,13 +1092,45 @@ Once clarified, please update the issue and change label from `status:needs-clar
                 )
                 commit_result = self.git.commit(commit_msg)
 
-                if not commit_result.success:
+                commit_status = classify_commit_result(
+                    commit_result.success,
+                    commit_result.output,
+                    commit_result.error or "",
+                )
+                if commit_status == "failed":
                     raise RuntimeError(f"Commit failed: {commit_result.error}")
+                if commit_status == "no_op":
+                    commit_check = {
+                        "name": "commit",
+                        "exit_code": 1,
+                        "result": "no_op",
+                        "error_type": "commit_no_changes",
+                        "primary_message": "No changes to commit",
+                        "evidence": "No changes to commit",
+                    }
+                    self._latest_commit_action_pack = build_action_pack(
+                        task=self._build_task_context(
+                            issue.number, attempt=test_retry_count + 1
+                        ),
+                        phase="finalize",
+                        status="no_op",
+                        checks=[commit_check],
+                        blockers=[],
+                    )
+                    self.github.comment_pr(
+                        pr.number,
+                        "ℹ️ **Retry commit resulted in no-op**\n\n"
+                        f"{self._render_action_pack_comment(self._latest_commit_action_pack)}",
+                    )
+                    self.github.remove_pr_label(pr.number, self.STATUS_IMPLEMENTING)
+                    self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
+                    return False
 
                 # Run quality gate before issue-specific tests
                 logger.info(f"[{self.agent_id}] Running quality checks (ruff/mypy)...")
                 quality_passed, quality_output = self._run_quality_checks(
-                    git_path=self.git.path
+                    git_path=self.git.path,
+                    issue_number=issue_number,
                 )
                 if not quality_passed:
                     test_retry_count += 1
@@ -1011,12 +1138,17 @@ Once clarified, please update the issue and change label from `status:needs-clar
                     logger.warning(
                         f"[{self.agent_id}] Quality checks failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
                     )
+                    quality_pack = self._latest_quality_action_pack
+                    quality_body = (
+                        self._render_action_pack_comment(quality_pack)
+                        if quality_pack is not None
+                        else quality_output[:2000]
+                    )
                     self.github.comment_pr(
                         pr.number,
                         f"⚠️ **Quality checks failed during retry (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
                         "Retrying implementation with quality feedback...\n\n"
-                        "<details>\n<summary>Quality output</summary>\n\n"
-                        f"```\n{quality_output[:2000]}\n```\n\n</details>",
+                        f"{quality_body}",
                     )
                     if test_retry_count >= self.MAX_RETRIES:
                         raise RuntimeError(
@@ -1048,13 +1180,18 @@ Once clarified, please update the issue and change label from `status:needs-clar
                     f"[{self.agent_id}] Tests failed (attempt {test_retry_count}/{self.MAX_RETRIES})"
                 )
 
+                test_pack = self._latest_test_action_pack
+                test_body = (
+                    self._render_action_pack_comment(test_pack)
+                    if test_pack is not None
+                    else test_output[:2000]
+                )
                 # Comment on PR about test failure
                 self.github.comment_pr(
                     pr.number,
                     f"⚠️ **Test failed during retry (attempt {test_retry_count}/{self.MAX_RETRIES})**\n\n"
                     f"Retrying implementation with test feedback...\n\n"
-                    f"<details>\n<summary>Test output</summary>\n\n"
-                    f"```\n{test_output[:2000]}\n```\n\n</details>",
+                    f"{test_body}",
                 )
 
                 if test_retry_count >= self.MAX_RETRIES:
@@ -1277,7 +1414,16 @@ Please analyze and fix the CI failures.
         test_path = self._locate_issue_test_file(issue_number, repo_path)
 
         if test_path is None:
-            return False, f"Test file not found: tests/test_issue_{issue_number}.py"
+            message = f"Test file not found: tests/test_issue_{issue_number}.py"
+            check = parse_pytest_output(message, 1)
+            self._latest_test_action_pack = build_action_pack(
+                task=self._build_task_context(issue_number),
+                phase="test",
+                status="failed",
+                checks=[check],
+                blockers=[{"type": "missing_test_file", "message": message}],
+            )
+            return False, message
 
         test_file = str(test_path.relative_to(repo_path))
 
@@ -1294,6 +1440,14 @@ Please analyze and fix the CI failures.
 
             output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
             success = result.returncode == 0
+            check = parse_pytest_output(output, result.returncode)
+            self._latest_test_action_pack = build_action_pack(
+                task=self._build_task_context(issue_number),
+                phase="test",
+                status="ok" if success else "failed",
+                checks=[check],
+                blockers=[],
+            )
 
             if success:
                 logger.info(f"[{self.agent_id}] Tests passed for issue #{issue_number}")
@@ -1307,13 +1461,31 @@ Please analyze and fix the CI failures.
         except subprocess.TimeoutExpired:
             error_msg = "Tests timed out after 5 minutes"
             logger.error(f"[{self.agent_id}] {error_msg}")
+            check = parse_pytest_output(error_msg, 1)
+            self._latest_test_action_pack = build_action_pack(
+                task=self._build_task_context(issue_number),
+                phase="test",
+                status="failed",
+                checks=[check],
+                blockers=[{"type": "timeout", "message": error_msg}],
+            )
             return False, error_msg
         except Exception as e:
             error_msg = f"Test execution error: {str(e)}"
             logger.error(f"[{self.agent_id}] {error_msg}")
+            check = parse_pytest_output(error_msg, 1)
+            self._latest_test_action_pack = build_action_pack(
+                task=self._build_task_context(issue_number),
+                phase="test",
+                status="failed",
+                checks=[check],
+                blockers=[{"type": "exception", "message": error_msg}],
+            )
             return False, error_msg
 
-    def _run_quality_checks(self, git_path: Path | None = None) -> tuple[bool, str]:
+    def _run_quality_checks(
+        self, git_path: Path | None = None, issue_number: int = 0
+    ) -> tuple[bool, str]:
         """Run repo-wide quality checks before issue-specific tests."""
         repo_path = git_path or self.git.path
         checks = [
@@ -1321,6 +1493,8 @@ Please analyze and fix the CI failures.
             ("mypy", ["uv", "run", "mypy", "."]),
         ]
         outputs: list[str] = []
+        check_results = []
+        blockers = []
         all_passed = True
 
         for check_name, cmd in checks:
@@ -1336,14 +1510,43 @@ Please analyze and fix the CI failures.
                     f"{check_name} (exit={result.returncode})\n"
                     f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
                 )
+                raw_output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+                if check_name == "ruff":
+                    check_results.append(
+                        parse_ruff_output(raw_output, result.returncode)
+                    )
+                else:
+                    check_results.append(
+                        parse_mypy_output(raw_output, result.returncode)
+                    )
                 if result.returncode != 0:
                     all_passed = False
             except subprocess.TimeoutExpired:
                 all_passed = False
-                outputs.append(f"{check_name} timed out after 5 minutes")
+                timeout_message = f"{check_name} timed out after 5 minutes"
+                outputs.append(timeout_message)
+                blockers.append({"type": "timeout", "message": timeout_message})
+                if check_name == "ruff":
+                    check_results.append(parse_ruff_output(timeout_message, 1))
+                else:
+                    check_results.append(parse_mypy_output(timeout_message, 1))
             except Exception as e:
                 all_passed = False
-                outputs.append(f"{check_name} execution error: {e}")
+                error_message = f"{check_name} execution error: {e}"
+                outputs.append(error_message)
+                blockers.append({"type": "exception", "message": error_message})
+                if check_name == "ruff":
+                    check_results.append(parse_ruff_output(error_message, 1))
+                else:
+                    check_results.append(parse_mypy_output(error_message, 1))
+
+        self._latest_quality_action_pack = build_action_pack(
+            task=self._build_task_context(issue_number=issue_number),
+            phase="quality",
+            status="ok" if all_passed else "failed",
+            checks=check_results,
+            blockers=blockers,
+        )
 
         return all_passed, "\n\n".join(outputs)
 
