@@ -20,7 +20,7 @@ from pathlib import Path
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from shared.config import get_agent_config
+from shared.config import get_agent_config, resolve_runtime_settings
 from shared.git_operations import GitOperations
 from shared.github_client import GitHubClient, Issue, PullRequest
 from shared.llm_client import LLMClient
@@ -1535,6 +1535,7 @@ def main() -> None:
     )
     parser.add_argument(
         "repo",
+        nargs="?",
         help="Repository in owner/repo format",
     )
     parser.add_argument(
@@ -1559,13 +1560,50 @@ def main() -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    agent = WorkerAgent(args.repo, config_path=args.config)
+    cli_run_mode = "once" if args.once else None
+    try:
+        settings = resolve_runtime_settings(
+            cli_repo=args.repo,
+            config_path=args.config,
+            cli_run_mode=cli_run_mode,
+        )
+    except ValueError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
-    if args.once:
-        success = agent.run_once()
-        sys.exit(0 if success else 1)
-    else:
-        agent.run()
+    if settings.run_mode == "once":
+        failures: list[str] = []
+        for repo in settings.target_repos:
+            started = time.perf_counter()
+            logger.info(f"[repo={repo}] started")
+            try:
+                success = WorkerAgent(repo, config_path=args.config).run_once()
+            except Exception as exc:
+                success = False
+                logger.exception(f"[repo={repo}] failed: {exc}")
+            duration = time.perf_counter() - started
+            if success:
+                logger.info(f"[repo={repo}] success duration={duration:.2f}s")
+            else:
+                logger.error(f"[repo={repo}] failed duration={duration:.2f}s")
+                failures.append(repo)
+                if settings.fail_fast:
+                    break
+
+        if failures:
+            print("Failed repositories: " + ", ".join(failures), file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+
+    if len(settings.target_repos) != 1:
+        print(
+            "Daemon mode requires exactly one target repository. "
+            "Use positional repo or TARGET_REPOS with a single repo.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    WorkerAgent(settings.target_repos[0], config_path=args.config).run()
 
 
 if __name__ == "__main__":

@@ -128,6 +128,33 @@ cp config/repos.yml.example config/repos.yml
 # repos.yml でリポジトリとLLMバックエンドを設定
 ```
 
+### 他プロジェクトへ適用
+
+```bash
+# 対象リポジトリへテンプレート/ラベルを投入
+scripts/setup-repository.sh --repo owner/repo
+
+# 変更予定だけ確認（実変更なし）
+scripts/setup-repository.sh --repo owner/repo --dry-run
+```
+
+必要権限:
+- リポジトリへの書き込み権限（ラベル更新、テンプレート反映、push）
+- `gh auth login` 済みの GitHub CLI
+
+主要コマンド:
+- `uv run planner-agent/main.py owner/repo --once`
+- `uv run worker-agent/main.py owner/repo --once`
+- `uv run reviewer-agent/main.py owner/repo --once`
+- `TARGET_REPOS=org/repo-a,org/repo-b FAIL_FAST=false uv run worker-agent/main.py --once`
+
+関連ドキュメント:
+- `docs/SETUP_GUIDE.md`
+- `docs/ARCHITECTURE.md`
+- `docs/CUSTOMIZATION.md`
+- `docs/TROUBLESHOOTING.md`
+- `docs/DISTRIBUTION_OPTIONS.md`
+
 ## CLIとして使う（おすすめ）
 
 このレポを改善しつつ、各プロジェクト側にコードを置かない運用ができます。

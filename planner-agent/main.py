@@ -16,7 +16,7 @@ from pathlib import Path
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from shared.config import get_agent_config
+from shared.config import get_agent_config, resolve_runtime_settings
 from shared.github_client import GitHubClient, Issue
 from shared.llm_client import LLMClient
 
@@ -380,6 +380,7 @@ def main() -> None:
     )
     parser.add_argument(
         "repo",
+        nargs="?",
         help="Repository in owner/repo format",
     )
     parser.add_argument(
@@ -414,9 +415,26 @@ def main() -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    agent = PlannerAgent(args.repo, config_path=args.config)
+    cli_run_mode = "once" if args.once else ("daemon" if args.daemon else None)
+    try:
+        settings = resolve_runtime_settings(
+            cli_repo=args.repo,
+            config_path=args.config,
+            cli_run_mode=cli_run_mode,
+        )
+    except ValueError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     if args.story:
+        if len(settings.target_repos) != 1:
+            print(
+                "Story mode requires exactly one target repository. "
+                "Set positional repo or TARGET_REPOS to a single value.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        agent = PlannerAgent(settings.target_repos[0], config_path=args.config)
         # Non-interactive mode
         result = agent.create_spec(args.story)
         if result:
@@ -425,14 +443,49 @@ def main() -> None:
         else:
             print("Failed to create specification")
             sys.exit(1)
-    elif args.once:
-        handled = agent.run_once()
-        sys.exit(0 if handled else 1)
-    elif args.daemon:
-        agent.run_daemon()
+    elif settings.run_mode == "once":
+        failures: list[str] = []
+        for repo in settings.target_repos:
+            started = time.perf_counter()
+            logger.info(f"[repo={repo}] started")
+            try:
+                handled = PlannerAgent(repo, config_path=args.config).run_once()
+            except Exception as exc:
+                handled = False
+                logger.exception(f"[repo={repo}] failed: {exc}")
+            duration = time.perf_counter() - started
+            if handled:
+                logger.info(f"[repo={repo}] success duration={duration:.2f}s")
+            else:
+                logger.error(f"[repo={repo}] failed duration={duration:.2f}s")
+                failures.append(repo)
+                if settings.fail_fast:
+                    break
+
+        if failures:
+            print(
+                "Failed repositories: " + ", ".join(failures),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        sys.exit(0)
+    elif settings.run_mode == "daemon":
+        if len(settings.target_repos) != 1:
+            print(
+                "Daemon mode requires exactly one target repository. "
+                "Use positional repo or TARGET_REPOS with a single repo.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        PlannerAgent(settings.target_repos[0], config_path=args.config).run_daemon()
     else:
-        # Interactive mode
-        agent.interactive_mode()
+        if len(settings.target_repos) != 1:
+            print(
+                "Interactive mode requires exactly one target repository.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        PlannerAgent(settings.target_repos[0], config_path=args.config).interactive_mode()
 
 
 if __name__ == "__main__":

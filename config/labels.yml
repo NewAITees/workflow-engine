@@ -1,0 +1,17 @@
+profiles:
+  default:
+    - name: status:ready
+      color: "0E8A16"
+      description: Ready for worker implementation
+    - name: status:implementing
+      color: "FBCA04"
+      description: Currently being implemented
+    - name: status:testing
+      color: "1D76DB"
+      description: Tests are running
+    - name: status:reviewing
+      color: "5319E7"
+      description: Waiting for reviewer
+    - name: status:failed
+      color: "D93F0B"
+      description: Processing failed and needs attention

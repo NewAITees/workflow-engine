@@ -1,24 +1,37 @@
 # Workflow Engine Configuration
-# Copy this file to repos.yml and customize
+# Copy this file to repos.yml and customize.
+#
+# Runtime priority:
+# 1. CLI args (e.g., owner/repo positional)
+# 2. Environment variables (TARGET_REPOS, RUN_MODE, MAX_CONCURRENCY, FAIL_FAST)
+# 3. This YAML file
+
+defaults:
+  run_mode: once        # once | daemon
+  max_concurrency: 3    # Upper bound for multi-repo execution
+  fail_fast: false      # true: stop on first failure, false: continue and summarize
 
 repositories:
-  # Example: Configure a repository for the workflow
+  # Single-repository example
   - name: owner/repo-name
-    poll_interval: 300      # Seconds between checks (default: 300)
-    work_dir: ~/.workflow-engine/workspaces  # Where to clone repos
-    llm_backend: codex      # "codex" (default) or "claude"
-    codex_cli: codex        # Path to Codex CLI
-    claude_cli: claude      # Path to Claude Code CLI
-    gh_cli: gh              # Path to GitHub CLI
-    log_level: INFO         # Logging level
-    auto_merge: false       # Auto-merge approved PRs (default: false)
-    merge_method: squash    # "squash" (default), "merge", or "rebase"
-    stale_lock_timeout_minutes: 30  # Recover stale implementing locks
+    enabled: true                    # false to keep config but exclude from targets
+    labels_profile: default          # Label profile name from config/labels.yml
+    poll_interval: 300               # Seconds between checks (default: 300)
+    work_dir: ~/.workflow-engine/workspaces  # Workspace root path
+    llm_backend: codex               # codex (default) or claude
+    codex_cli: codex                 # Codex CLI path
+    claude_cli: claude               # Claude Code CLI path
+    gh_cli: gh                       # GitHub CLI path
+    log_level: INFO                  # Logging level
+    auto_merge: false                # Auto-merge approved PRs
+    merge_method: squash             # squash | merge | rebase
+    stale_lock_timeout_minutes: 30   # Stale lock recovery threshold
 
-  # Example with Claude backend and auto-merge enabled
-  # - name: myorg/myproject
-  #   llm_backend: claude   # Use Claude Code instead of Codex
-  #   poll_interval: 60     # Check more frequently
-  #   auto_merge: true      # Enable auto-merge
-  #   merge_method: squash  # Squash commits on merge
-  #   log_level: DEBUG
+  # Multi-repository example
+  - name: owner/repo-a
+    enabled: true
+    labels_profile: default
+
+  - name: owner/repo-b
+    enabled: true
+    labels_profile: default
