@@ -43,8 +43,23 @@ class WorkflowLauncher:
             cmd.extend(["--config", self.config])
         return cmd
 
+    def _run_health_gate(self) -> None:
+        """Block startup unless the health gate passes."""
+        health_check_script = self.script_dir / "health_check.py"
+        cmd = ["uv", "run", str(health_check_script), "--json"]
+        try:
+            subprocess.run(cmd, cwd=self.engine_dir, check=True)
+        except subprocess.CalledProcessError as exc:
+            print("Health gate failed. Startup is blocked.")
+            stderr = getattr(exc, "stderr", None)
+            if stderr:
+                print(stderr)
+            sys.exit(1)
+
     def launch_subprocess(self) -> None:
         """Launch agents as subprocesses."""
+        self._run_health_gate()
+
         print("=" * 50)
         print("  Workflow Engine Launcher (subprocess mode)")
         print("=" * 50)
@@ -95,6 +110,8 @@ class WorkflowLauncher:
 
     def launch_tmux(self) -> None:
         """Launch agents in tmux session."""
+        self._run_health_gate()
+
         if self.is_windows:
             print(
                 "tmux is not available on Windows. Use 'subprocess' or 'terminal' mode."
@@ -213,6 +230,8 @@ class WorkflowLauncher:
 
     def launch_terminal(self) -> None:
         """Launch agents in Windows Terminal tabs."""
+        self._run_health_gate()
+
         if not self.is_windows:
             print("Windows Terminal is only available on Windows. Use 'tmux' mode.")
             sys.exit(1)

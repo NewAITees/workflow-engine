@@ -36,6 +36,13 @@ if [ -z "$REPO" ]; then
     exit 1
 fi
 
+# Health Gate (must pass before any agent starts)
+echo "Running health gate..."
+if ! uv run "$SCRIPT_DIR/health_check.py" --json > /dev/null; then
+    echo "Health gate failed. Startup is blocked."
+    exit 1
+fi
+
 # Build config argument
 CONFIG_ARG=""
 if [ -n "$CONFIG" ]; then
