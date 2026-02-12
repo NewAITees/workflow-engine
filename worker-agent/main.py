@@ -138,6 +138,19 @@ class WorkerAgent:
             timeout = 30
         return timeout if timeout > 0 else 30
 
+    def _get_coverage_target(self) -> int:
+        """Get numeric coverage target from config with safe fallback."""
+        value = getattr(self.config, "coverage_target", 80)
+        try:
+            target = int(value)
+        except (TypeError, ValueError):
+            return 80
+        if target < 0:
+            return 0
+        if target > 100:
+            return 100
+        return target
+
     def _parse_github_datetime(self, ts: str | None) -> datetime | None:
         """Parse GitHub timestamp string into timezone-aware datetime."""
         if not ts:
@@ -387,6 +400,9 @@ class WorkerAgent:
                 test_result = self.llm.generate_tests(
                     spec=(
                         f"{issue.body}\n\n"
+                        "## Coverage Requirement\n"
+                        f"Target coverage for this issue: {self._get_coverage_target()}%\n"
+                        f"Coverage target token: \\b{self._get_coverage_target()}\\b\n\n"
                         "## Test File Requirement\n"
                         f"Create/overwrite exactly one issue test file at "
                         f"`tests/test_issue_{issue.number}.py`."
@@ -404,6 +420,11 @@ class WorkerAgent:
                 self._ensure_issue_test_file(
                     issue.number, issue_git.path, before_test_files
                 )
+                if self._locate_issue_test_file(issue.number, issue_git.path) is None:
+                    raise RuntimeError(
+                        f"Test generation produced no runnable tests for issue #{issue.number}. "
+                        "Planner should review test design."
+                    )
 
                 # Commit tests
                 logger.info(f"[{self.agent_id}] Committing tests...")
@@ -412,7 +433,10 @@ class WorkerAgent:
                 )
                 test_commit_result = issue_git.commit(test_commit_msg)
 
-                if not test_commit_result.success:
+                if (
+                    not test_commit_result.success
+                    and test_commit_result.error != "No changes to commit"
+                ):
                     raise RuntimeError(
                         f"Test commit failed: {test_commit_result.error}"
                     )
@@ -741,6 +765,16 @@ Please analyze and fix the CI failures.
                     "Test fix loop exhausted maximum retries. Please review test design and specification.",
                 )
                 self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                self.github.remove_label(issue.number, self.STATUS_TESTING)
+                self.github.add_label(issue.number, self.STATUS_NEEDS_CLARIFICATION)
+            elif "produced no runnable tests" in failure_reason:
+                self._comment_worker_escalation(
+                    issue.number,
+                    "test-generation-empty",
+                    "Generated tests were empty or unusable. Please review test design.",
+                )
+                self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                self.github.remove_label(issue.number, self.STATUS_TESTING)
                 self.github.add_label(issue.number, self.STATUS_NEEDS_CLARIFICATION)
             elif self._is_specification_unclear(failure_reason, issue.body):
                 self.lock.mark_needs_clarification(
@@ -769,6 +803,7 @@ Please analyze and fix the CI failures.
                 )
 
                 self.github.remove_label(issue.number, self.STATUS_IMPLEMENTING)
+                self.github.remove_label(issue.number, self.STATUS_TESTING)
                 self.github.add_label(issue.number, self.STATUS_NEEDS_CLARIFICATION)
             else:
                 # Mark as failed
@@ -1285,7 +1320,18 @@ Please analyze and fix the CI failures.
 
         try:
             result = subprocess.run(
-                ["pytest", test_file, "-v", "--tb=short"],
+                [
+                    "uv",
+                    "run",
+                    "pytest",
+                    test_file,
+                    "-v",
+                    "--tb=short",
+                    "--cov=.",
+                    "--cov-report=term-missing",
+                    "--cov-report=xml:coverage.xml",
+                    f"--cov-fail-under={self._get_coverage_target()}",
+                ],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,

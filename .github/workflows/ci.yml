@@ -5,6 +5,11 @@ on:
     branches: [ main ]
   pull_request:
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
   quality:
     name: Quality Checks
@@ -42,8 +47,87 @@ jobs:
           uv run mypy worker-agent/main.py
           uv run mypy reviewer-agent/main.py
 
-      - name: Test (Pytest)
-        run: uv run pytest
+      - name: Test (Pytest + Coverage)
+        id: test
+        continue-on-error: true
+        run: |
+          uv run pytest \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=json:coverage.json
+
+      - name: Upload coverage artifacts
+        if: always() && matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            coverage.json
+          if-no-files-found: warn
+
+      - name: PR comment with test result
+        if: always() && github.event_name == 'pull_request' && matrix.python-version == '3.11'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const testOutcome = "${{ steps.test.outcome }}";
+            let coverageText = "N/A";
+            try {
+              const raw = fs.readFileSync("coverage.json", "utf8");
+              const parsed = JSON.parse(raw);
+              const total = parsed?.totals?.percent_covered;
+              if (typeof total === "number") {
+                coverageText = `${total.toFixed(2)}%`;
+              }
+            } catch (e) {
+              // coverage file may be absent when tests fail early.
+            }
+
+            const body = [
+              "## CI Test Result",
+              "",
+              `- Pytest: **${testOutcome}**`,
+              `- Coverage: **${coverageText}**`,
+              "- Coverage artifacts: `coverage.xml`, `coverage.json`",
+              "",
+              testOutcome === "success"
+                ? "✅ Tests passed."
+                : "❌ Tests failed. Label updated to `status:changes-requested`."
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            });
+
+      - name: Mark PR status:changes-requested on test failure
+        if: github.event_name == 'pull_request' && matrix.python-version == '3.11' && steps.test.outcome != 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+            const labels = await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+            const names = new Set(labels.map((l) => l.name));
+            if (!names.has("status:changes-requested")) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number,
+                labels: ["status:changes-requested"]
+              });
+            }
 
       - name: Run pre-commit (if available)
         run: |
@@ -52,3 +136,7 @@ jobs:
           else
             echo "pre-commit is not available. Skipping."
           fi
+
+      - name: Fail job if tests failed
+        if: steps.test.outcome != 'success'
+        run: exit 1

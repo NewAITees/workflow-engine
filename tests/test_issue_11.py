@@ -13,9 +13,7 @@ import pytest
 
 from shared.config import AgentConfig
 from shared.github_client import Issue
-from shared.llm_client import LLMClient
-from shared.llm_client import LLMResult
-
+from shared.llm_client import LLMClient, LLMResult
 
 WORKER_SPEC = importlib.util.spec_from_file_location(
     "worker_main",

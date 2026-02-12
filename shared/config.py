@@ -22,6 +22,7 @@ class AgentConfig:
     auto_merge: bool = False  # Auto-merge approved PRs
     merge_method: str = "squash"  # "squash", "merge", or "rebase"
     stale_lock_timeout_minutes: int = 30  # Recover stale implementing locks
+    coverage_target: int = 80  # Minimum coverage threshold for worker test runs
 
     def __post_init__(self) -> None:
         if self.work_dir is None:
@@ -41,6 +42,8 @@ class AgentConfig:
             )
         if self.stale_lock_timeout_minutes <= 0:
             raise ValueError("stale_lock_timeout_minutes must be a positive integer")
+        if not (0 <= self.coverage_target <= 100):
+            raise ValueError("coverage_target must be between 0 and 100")
 
 
 @dataclass
