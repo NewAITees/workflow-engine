@@ -10,7 +10,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 SPEC_PATH = Path(__file__).parent.parent / "scripts" / "status.py"
 
 
