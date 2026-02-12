@@ -47,6 +47,10 @@ class ReviewerAgent:
     """Autonomous reviewer that reviews PRs."""
 
     # Status labels
+    STATUS_SPEC_REVIEW = "status:spec-review"
+    STATUS_READY = "status:ready"
+    STATUS_ESCALATED = "status:escalated"
+    STATUS_FAILED = "status:failed"
     STATUS_REVIEWING = "status:reviewing"
     STATUS_IN_REVIEW = "status:in-review"
     STATUS_APPROVED = "status:approved"
@@ -84,6 +88,7 @@ class ReviewerAgent:
 
         while True:
             try:
+                self._process_spec_review_issues()
                 self._process_reviewing_prs()
                 time.sleep(self.config.poll_interval)
 
@@ -96,12 +101,116 @@ class ReviewerAgent:
 
     def run_once(self) -> bool:
         """Process one PR and return. For testing."""
+        issues = self.github.list_issues(labels=[self.STATUS_SPEC_REVIEW])
+        if issues:
+            return self._try_review_spec_issue(issues[0])
+
         prs = self.github.list_prs(labels=[self.STATUS_REVIEWING])
         if not prs:
             logger.info("No PRs to review")
             return False
 
         return self._try_review_pr(prs[0])
+
+    def _process_spec_review_issues(self) -> None:
+        """Find and process issues waiting for specification review."""
+        issues = self.github.list_issues(labels=[self.STATUS_SPEC_REVIEW])
+        if not issues:
+            logger.debug("No issues pending spec review")
+            return
+
+        logger.info(f"Found {len(issues)} issue(s) for specification review")
+        for issue in issues:
+            if self._try_review_spec_issue(issue):
+                logger.info(f"Processed spec review for issue #{issue.number}")
+
+    def _try_review_spec_issue(self, issue: Issue) -> bool:
+        """Review one issue specification and transition labels by result."""
+        logger.info(
+            f"Attempting specification review for issue #{issue.number}: {issue.title}"
+        )
+
+        lock_result = self.lock.try_lock_issue(
+            issue.number,
+            self.STATUS_SPEC_REVIEW,
+            self.STATUS_SPEC_REVIEW,
+        )
+        if not lock_result.success:
+            logger.debug(
+                f"Could not lock issue #{issue.number} for spec review: {lock_result.error}"
+            )
+            return False
+
+        try:
+            review_result = self.llm.review_spec(
+                spec=issue.body,
+                repo_context=f"Repository: {self.repo}",
+            )
+            if not review_result.success:
+                raise RuntimeError(f"Spec review failed: {review_result.error}")
+
+            try:
+                review_data = json.loads(review_result.output)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "Failed to parse spec review result as JSON"
+                ) from exc
+
+            decision = str(review_data.get("decision", "")).strip().lower()
+            summary = str(review_data.get("summary", "")).strip()
+            issues = review_data.get("issues", [])
+            if not summary:
+                summary = "No summary provided."
+
+            if decision == "approve":
+                self.github.comment_issue(
+                    issue.number,
+                    "SPEC_REVIEW:APPROVED\n\n"
+                    f"{summary}\n\n"
+                    f"Transitioning issue to `{self.STATUS_READY}`.",
+                )
+                self.github.remove_label(issue.number, self.STATUS_SPEC_REVIEW)
+                self.github.remove_label(issue.number, self.STATUS_ESCALATED)
+                self.github.remove_label(issue.number, self.STATUS_FAILED)
+                self.github.add_label(issue.number, self.STATUS_READY)
+                return True
+
+            issue_lines: list[str] = []
+            if isinstance(issues, list):
+                for idx, finding in enumerate(issues, start=1):
+                    if not isinstance(finding, dict):
+                        continue
+                    severity = str(finding.get("severity", "unspecified")).upper()
+                    description = str(finding.get("description", "")).strip()
+                    if description:
+                        issue_lines.append(f"{idx}. [{severity}] {description}")
+
+            findings_block = (
+                "\n".join(issue_lines)
+                if issue_lines
+                else "1. [UNSPECIFIED] Details omitted."
+            )
+            self.github.comment_issue(
+                issue.number,
+                "ESCALATION:reviewer\n\n"
+                "SPEC_REVIEW:CHANGES_REQUESTED\n\n"
+                f"Summary: {summary}\n\n"
+                "Issues:\n"
+                f"{findings_block}\n\n"
+                "Planner should update this specification and set "
+                f"`{self.STATUS_SPEC_REVIEW}` for re-review.",
+            )
+            self.github.remove_label(issue.number, self.STATUS_SPEC_REVIEW)
+            self.github.remove_label(issue.number, self.STATUS_READY)
+            self.github.add_label(issue.number, self.STATUS_ESCALATED)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to review spec for issue #{issue.number}: {e}")
+            self.github.comment_issue(
+                issue.number,
+                f"⚠️ Spec review failed: {e}\n\nPlease retry spec review.",
+            )
+            return False
 
     def _process_reviewing_prs(self) -> None:
         """Find and process PRs ready for review."""

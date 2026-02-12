@@ -33,6 +33,7 @@ class PlannerAgent:
     """Interactive agent for creating specifications from stories."""
 
     STATUS_READY = "status:ready"
+    STATUS_SPEC_REVIEW = "status:spec-review"
     STATUS_ESCALATED = "status:escalated"
     STATUS_FAILED = "status:failed"
     MAX_ESCALATION_RETRIES = 3
@@ -96,7 +97,7 @@ class PlannerAgent:
                     issue_num = self.github.create_issue(
                         title=title,
                         body=spec,
-                        labels=[self.STATUS_READY],
+                        labels=[self.STATUS_SPEC_REVIEW],
                     )
 
                     if issue_num:
@@ -124,7 +125,7 @@ class PlannerAgent:
         issue_num = self.github.create_issue(
             title=title,
             body=spec,
-            labels=[self.STATUS_READY],
+            labels=[self.STATUS_SPEC_REVIEW],
         )
 
         if issue_num:
@@ -256,11 +257,12 @@ class PlannerAgent:
             issue.number,
             f"✅ Planner updated the specification from escalation feedback.\n\n"
             f"PLANNER_RETRY:{new_retry}\n\n"
-            f"Transitioning issue back to `{self.STATUS_READY}`.",
+            f"Transitioning issue back to `{self.STATUS_SPEC_REVIEW}`.",
         )
+        self.github.remove_label(issue.number, self.STATUS_READY)
         self.github.remove_label(issue.number, self.STATUS_ESCALATED)
         self.github.remove_label(issue.number, self.STATUS_FAILED)
-        self.github.add_label(issue.number, self.STATUS_READY)
+        self.github.add_label(issue.number, self.STATUS_SPEC_REVIEW)
         return True
 
     def _latest_escalation(self, comments: list[dict]) -> dict | None:
