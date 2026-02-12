@@ -9,3 +9,4 @@ repositories:
     claude_cli: claude
     gh_cli: gh
     log_level: INFO
+    auto_merge: true          # Auto-merge approved PRs

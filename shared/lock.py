@@ -258,6 +258,17 @@ class LockManager:
                 success=False, error=f"Failed to add PR label {to_status}"
             )
 
+        # Step 5: Verify the transition
+        pr = self.github.get_pr(pr_number)
+        if pr is None:
+            return LockResult(success=False, error="Failed to verify PR state")
+
+        if to_status not in pr.labels:
+            return LockResult(
+                success=False,
+                error=f"Label {to_status} not found after transition",
+            )
+
         logger.info(f"Successfully locked PR #{pr_number}")
         return LockResult(success=True, lock_id=ack_msg)
 

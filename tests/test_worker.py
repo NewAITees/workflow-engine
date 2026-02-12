@@ -546,6 +546,41 @@ class TestWorkerAgent:
         assert passed is False
         assert status == "pending"
 
+    @patch("time.sleep")
+    @patch("shared.git_operations.GitOperations")
+    @patch("shared.llm_client.LLMClient")
+    @patch("shared.lock.LockManager")
+    @patch("shared.github_client.GitHubClient")
+    @patch("shared.config.get_agent_config")
+    def test_wait_for_ci_none_grace_then_success(
+        self, mock_config, mock_github, mock_lock, mock_llm, mock_git, mock_sleep
+    ):
+        """Treat persistent 'none' as no-CI only after grace period."""
+        mock_config.return_value = MagicMock(
+            work_dir="/tmp/test",
+            llm_backend="codex",
+            gh_cli="gh",
+        )
+        mock_git.return_value.workspace = "/tmp/test/workspace"
+
+        agent = WorkerAgent("owner/repo")
+        agent.CI_CHECK_INTERVAL = 1
+        agent.CI_NO_CHECKS_GRACE_SECONDS = 2
+        agent.github.get_ci_status = MagicMock(
+            return_value={
+                "status": "none",
+                "conclusion": "none",
+                "checks": [],
+                "pending_count": 0,
+                "failed_count": 0,
+            }
+        )
+
+        passed, status = agent._wait_for_ci(123, timeout=5)
+
+        assert passed is True
+        assert status == "success"
+
     @patch("shared.git_operations.GitOperations")
     @patch("shared.llm_client.LLMClient")
     @patch("shared.lock.LockManager")
@@ -964,6 +999,7 @@ class TestWorkerAgent:
             "ci-failed" in str(call)
             for call in agent.github.add_pr_label.call_args_list
         )
+        agent.github.add_label.assert_any_call(123, agent.STATUS_REVIEWING)
         # Issue implementation push should use force to avoid branch divergence failures
         mock_git_instance.push.assert_any_call("auto/issue-123", force=True)
         # Should comment local TDD result on PR
