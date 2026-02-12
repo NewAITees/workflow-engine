@@ -251,6 +251,47 @@ Brief summary of the changes
 
         return self._run(prompt, work_dir, timeout=300)
 
+    def review_spec(
+        self,
+        spec: str,
+        repo_context: str = "",
+        work_dir: Path | None = None,
+    ) -> LLMResult:
+        """
+        Review issue specification quality before implementation starts.
+
+        Returns JSON with decision, summary, and issues.
+        """
+        prompt = f"""You are reviewing a technical specification before implementation.
+
+## Specification
+{spec}
+
+## Repository Context
+{repo_context}
+
+## Instructions
+1. Validate requirement clarity, consistency, and testability.
+2. Flag ambiguity, missing acceptance criteria, and contradictions.
+3. Return ONLY valid JSON in this format:
+{{
+  "decision": "approve or changes_requested",
+  "summary": "Short summary of review outcome",
+  "issues": [
+    {{
+      "severity": "critical|major|minor",
+      "description": "Specific gap or ambiguity"
+    }}
+  ]
+}}
+
+Decision rule:
+- Use "approve" only when implementation can start safely.
+- Otherwise use "changes_requested".
+"""
+
+        return self._run(prompt, work_dir, timeout=300)
+
     def review_code_with_severity(
         self,
         spec: str,

@@ -64,7 +64,7 @@ class TestPlannerAgent:
             "PLANNER_RETRY:1" in str(call)
             for call in agent.github.comment_issue.call_args_list
         )
-        agent.github.add_label.assert_called_with(1, agent.STATUS_READY)
+        agent.github.add_label.assert_called_with(1, agent.STATUS_SPEC_REVIEW)
 
     @patch("planner_main.LLMClient")
     @patch("planner_main.GitHubClient")
