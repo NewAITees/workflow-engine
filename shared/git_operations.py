@@ -243,6 +243,25 @@ class GitOperations:
         """Prune worktree information."""
         return self._run(["worktree", "prune"])
 
+    def worktree_list_branches(self) -> dict[str, Path]:
+        """Return a mapping of branch name → worktree path for all registered worktrees.
+
+        Parses `git worktree list --porcelain` output.
+        Detached-HEAD worktrees are omitted.
+        """
+        result = self._run(["worktree", "list", "--porcelain"], check=False)
+        if not result.success:
+            return {}
+        mapping: dict[str, Path] = {}
+        current_path: Path | None = None
+        for line in result.output.splitlines():
+            if line.startswith("worktree "):
+                current_path = Path(line[len("worktree ") :])
+            elif line.startswith("branch ") and current_path is not None:
+                branch = line[len("branch ") :].removeprefix("refs/heads/")
+                mapping[branch] = current_path
+        return mapping
+
     @property
     def path(self) -> Path:
         """Get the workspace path."""

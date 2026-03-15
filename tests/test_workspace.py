@@ -100,6 +100,6 @@ class TestWorkspaceManager:
         # fetch is called once before any worktree attempts
         mock_main_git.fetch_origin.assert_called_once()
         assert mock_main_git.worktree_add.call_count == 2
-        assert mock_main_git.worktree_prune.call_count == 2
+        assert mock_main_git.worktree_prune.call_count == 3
         # ensure_branch_up_to_date is called each time add_wrapped runs
         assert mock_main_git.ensure_branch_up_to_date.call_count == 2

@@ -3,6 +3,7 @@ Workspace management using git worktrees.
 """
 
 import logging
+import shutil
 import subprocess
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -35,7 +36,23 @@ class WorkspaceManager:
             if not result.success:
                 raise RuntimeError(f"Failed to clone main repo: {result.error}")
 
+        # Prune stale worktree metadata on every startup
+        self.main_git.worktree_prune()
         self._ensure_dev_deps()
+
+    def _find_uv(self) -> str:
+        """Resolve the uv executable path, falling back to common install locations."""
+        found = shutil.which("uv")
+        if found:
+            return found
+        candidates = [
+            Path.home() / ".local" / "bin" / "uv",
+            Path("/usr/local/bin/uv"),
+        ]
+        for p in candidates:
+            if p.exists():
+                return str(p)
+        return "uv"  # last resort — subprocess will raise FileNotFoundError clearly
 
     def _ensure_dev_deps(self) -> None:
         """Install all extras (dev tools: pytest, mypy, ruff) into the main workspace venv.
@@ -46,10 +63,13 @@ class WorkspaceManager:
         if self.venv_path.exists() and (self.venv_path / "bin" / "pytest").exists():
             return  # Already installed
 
-        logger.info(f"Installing dev deps in main workspace venv at {self.venv_path}")
+        uv = self._find_uv()
+        logger.info(
+            f"Installing dev deps in main workspace venv at {self.venv_path} (uv={uv})"
+        )
         try:
             result = subprocess.run(
-                ["uv", "sync", "--all-extras"],
+                [uv, "sync", "--all-extras"],
                 cwd=self.main_work_dir,
                 capture_output=True,
                 text=True,
@@ -92,12 +112,23 @@ class WorkspaceManager:
 
         logger.info(f"Creating worktree at {worktree_path} on branch {branch}")
 
-        # Clean up existing if stale
+        # Remove stale worktree registered for the target path
         if worktree_path.exists():
-            # If directory exists, it might be a left-over worktree or just a dir
+            logger.warning(
+                f"Stale worktree directory found at {worktree_path}, removing..."
+            )
             self.main_git.worktree_remove(worktree_path)
-            # If remove failed or it wasn't a worktree but a dir, force remove dir?
-            # Git worktree remove should handle cleaning the entry.
+
+        # Remove any other worktree that is already holding the target branch
+        branch_map = self.main_git.worktree_list_branches()
+        if branch in branch_map:
+            stale_path = branch_map[branch]
+            if stale_path != self.main_work_dir:
+                logger.warning(
+                    f"Branch '{branch}' already checked out at {stale_path}, removing stale worktree..."
+                )
+                self.main_git.worktree_remove(stale_path)
+                self.main_git.worktree_prune()
 
         # Fetch once before any branch sync / worktree creation
         fetch_result = self.main_git.fetch_origin()
