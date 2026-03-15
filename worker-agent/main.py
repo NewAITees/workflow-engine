@@ -61,6 +61,14 @@ class WorkerAgent:
     CI_POST_PUSH_SETTLE_SECONDS = 15
 
     MIN_SPEC_LENGTH = 100
+
+    # Code quality requirements appended to all LLM specs
+    CODE_QUALITY_REQUIREMENTS = (
+        "\n\n## Code Quality Requirements\n"
+        "- All public functions, methods, and classes MUST have docstrings.\n"
+        "- Docstring coverage must be at least 80% to pass CI checks.\n"
+        "- Use Google-style or reStructuredText docstrings consistently.\n"
+    )
     SPEC_UNCLEAR_KEYWORDS = [
         "ambiguous",
         "unclear",
@@ -392,6 +400,7 @@ class WorkerAgent:
                         "## Test File Requirement\n"
                         f"Create/overwrite exactly one issue test file at "
                         f"`tests/test_issue_{issue.number}.py`."
+                        f"{self.CODE_QUALITY_REQUIREMENTS}"
                     ),
                     repo_context=(
                         f"Repository: {self.repo}\n"
@@ -415,9 +424,14 @@ class WorkerAgent:
                 test_commit_result = issue_git.commit(test_commit_msg)
 
                 if not test_commit_result.success:
-                    raise RuntimeError(
-                        f"Test commit failed: {test_commit_result.error}"
-                    )
+                    if test_commit_result.error == "No changes to commit":
+                        logger.info(
+                            f"[{self.agent_id}] No test file changes detected (no-op), skipping test commit."
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"Test commit failed: {test_commit_result.error}"
+                        )
 
                 # TDD Step 2-4: Implementation with test retry loop
                 validation_failure_output = ""
@@ -430,7 +444,7 @@ class WorkerAgent:
                     )
 
                     # Prepare spec with test feedback if retrying
-                    impl_spec = issue.body
+                    impl_spec = issue.body + self.CODE_QUALITY_REQUIREMENTS
                     if test_retry_count > 0:
                         impl_spec += (
                             f"\n\n## Previous Validation Failure (Attempt {test_retry_count})\n"
@@ -645,10 +659,15 @@ Please analyze and fix the CI failures.
                     fix_commit_result = issue_git.commit(fix_commit_msg)
 
                     if not fix_commit_result.success:
-                        logger.error(
-                            f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
-                        )
-                        break
+                        if fix_commit_result.error == "No changes to commit":
+                            logger.info(
+                                f"[{self.agent_id}] CI fix produced no changes (no-op), skipping commit."
+                            )
+                        else:
+                            logger.error(
+                                f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
+                            )
+                            break
 
                     # Push fix
                     push_result = issue_git.push(branch_name)
@@ -976,7 +995,7 @@ Once clarified, please update the issue and change label from `status:needs-clar
                 )
 
                 # Prepare spec with review feedback and test feedback
-                impl_spec = f"{issue.body}\n\n## Review Feedback (Please address these issues)\n{feedback}"
+                impl_spec = f"{issue.body}{self.CODE_QUALITY_REQUIREMENTS}\n\n## Review Feedback (Please address these issues)\n{feedback}"
 
                 if test_retry_count > 0:
                     impl_spec += (
@@ -1156,10 +1175,15 @@ Please analyze and fix the CI failures.
                 fix_commit_result = self.git.commit(fix_commit_msg)
 
                 if not fix_commit_result.success:
-                    logger.error(
-                        f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
-                    )
-                    break
+                    if fix_commit_result.error == "No changes to commit":
+                        logger.info(
+                            f"[{self.agent_id}] CI fix produced no changes (no-op), skipping commit."
+                        )
+                    else:
+                        logger.error(
+                            f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
+                        )
+                        break
 
                 # Push fix (force push to update PR)
                 push_result = self.git.push(branch_name, force=True)

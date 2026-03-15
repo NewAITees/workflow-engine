@@ -14,6 +14,8 @@ repositories:
     auto_merge: false       # Auto-merge approved PRs (default: false)
     merge_method: squash    # "squash" (default), "merge", or "rebase"
     stale_lock_timeout_minutes: 30  # Recover stale implementing locks
+    # policy_db: ~/.workflow-engine/policies.db  # SQLite policy store (shared across projects)
+    # policy_server_url: null  # Reserved for future server-based policy store
 
   # Example with Claude backend and auto-merge enabled
   # - name: myorg/myproject
