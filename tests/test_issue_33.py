@@ -404,6 +404,18 @@ def test_worker_no_op_commit_does_not_mark_failed_or_escalate(
     agent._issue_workspace = MagicMock(return_value=nullcontext(issue_git))
     agent._snapshot_test_files = MagicMock(return_value=set())
     agent._ensure_issue_test_file = MagicMock(return_value=None)
+    agent._run_quality_checks = MagicMock(return_value=(True, "All checks passed!"))
+    agent._run_tests = MagicMock(return_value=(True, "All tests passed!"))
+    agent._auto_format = MagicMock()
+    agent.github.create_pr = MagicMock(
+        return_value="https://github.com/owner/repo/pull/1"
+    )
+    agent.github.get_default_branch = MagicMock(return_value="main")
+    agent.github.add_label = MagicMock(return_value=True)
+    agent.github.remove_label = MagicMock(return_value=True)
+    agent.github.comment_issue = MagicMock(return_value=True)
+    agent._wait_for_ci = MagicMock(return_value=(True, "CI passed"))
+    issue_git.push = MagicMock(return_value=MagicMock(success=True))
     agent.llm.generate_tests = MagicMock(
         return_value=LLMResult(success=True, output="ok")
     )
