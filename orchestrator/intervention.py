@@ -169,6 +169,31 @@ class InterventionService:
         self._increment_count(issue_num)
         return True
 
+    def _build_footer(self, anomaly: "Anomaly") -> str:
+        """Build a structured traceability footer for auto-created issues.
+
+        Args:
+            anomaly: The anomaly that triggered this issue creation.
+
+        Returns:
+            Markdown-formatted footer string to append to the issue body.
+        """
+        source_parts = []
+        if anomaly.issue_number:
+            source_parts.append(f"issue #{anomaly.issue_number}")
+        if anomaly.pr_number:
+            source_parts.append(f"PR #{anomaly.pr_number}")
+        timestamp = datetime.now(UTC).isoformat(timespec="seconds")
+        lines = [
+            "\n---",
+            "> 🤖 この issue は Orchestrator が自動生成しました。",
+            f"> - Anomaly: `{anomaly.anomaly_type.value}` — {anomaly.detail}",
+        ]
+        if source_parts:
+            lines.append(f"> - Source: {'、'.join(source_parts)}")
+        lines.append(f"> - 生成日時: {timestamp}")
+        return "\n".join(lines)
+
     def _do_create_issue(self, plan: InterventionPlan) -> bool:
         """Create a new GitHub Issue for the Worker to fix automatically."""
         title = plan.new_issue_title
@@ -177,8 +202,9 @@ class InterventionService:
             logger.error("CREATE_ISSUE called without title or body")
             return False
 
+        footer = self._build_footer(plan.anomaly)
         issue_num = self.github.create_issue(
-            title, body, labels=["status:ready", "orchestrator"]
+            title, body + footer, labels=["status:ready", "orchestrator"]
         )
         if not issue_num:
             logger.error("Failed to create issue")
@@ -241,7 +267,21 @@ Respond with JSON only, no other text:
 {{"action": "reset_spec|create_issue|stop_worker|mark_manual|ignore", "reason": "one sentence", "details": "brief explanation"}}"""
 
     def _generate_issue_spec(self, anomaly: Anomaly) -> tuple[str, str]:
-        """Ask Claude to generate a title and spec body for a new fix issue."""
+        """Ask Claude to generate a title and spec body for a new fix issue.
+
+        Args:
+            anomaly: The anomaly that triggered this issue creation.
+
+        Returns:
+            Tuple of (title, body) for the new GitHub issue.
+        """
+        parts = []
+        if anomaly.issue_number:
+            parts.append(f"issue #{anomaly.issue_number}")
+        if anomaly.pr_number:
+            parts.append(f"PR #{anomaly.pr_number}")
+        source_description = "、".join(parts) if parts else "N/A (system anomaly)"
+
         prompt = f"""You are monitoring an AI workflow engine. An anomaly was detected that represents
 a code-level problem that can be fixed automatically by a Worker agent.
 
@@ -251,6 +291,11 @@ a code-level problem that can be fixed automatically by a Worker agent.
 ## Task
 Write a GitHub Issue that describes the fix needed.
 The Issue will be picked up by an automated Worker agent, so be precise and actionable.
+
+## Anomaly Context (background only — do not include verbatim in the issue body)
+- Anomaly type: {anomaly.anomaly_type.value}
+- Detail: {anomaly.detail}
+- Source: {source_description}
 
 Respond with JSON only:
 {{"title": "short imperative title (max 60 chars)", "body": "full markdown spec with ## Overview, ## Requirements, ## Acceptance Criteria sections"}}"""
