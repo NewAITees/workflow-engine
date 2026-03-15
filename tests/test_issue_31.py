@@ -6,6 +6,8 @@ import importlib.util
 import json
 import subprocess
 import sys
+import types
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -15,14 +17,14 @@ REPO_ROOT = Path(__file__).parent.parent
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_dynamic_modules() -> None:
+def _cleanup_dynamic_modules() -> Generator[None, None, None]:
     yield
     for module_name in list(sys.modules):
         if module_name.startswith(("health_check_issue31_", "launch_issue31_")):
             sys.modules.pop(module_name, None)
 
 
-def _load_script_module(module_name: str, script_relative_path: str):
+def _load_script_module(module_name: str, script_relative_path: str) -> types.ModuleType:
     script_path = REPO_ROOT / script_relative_path
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     if spec is None or spec.loader is None:
@@ -40,7 +42,10 @@ def _cmd_text(cmd: Any) -> str:
 
 
 def _extract_json(stdout: str) -> dict[str, Any]:
-    return json.loads(stdout.strip())
+    payload: Any = json.loads(stdout.strip())
+    if isinstance(payload, dict):
+        return payload
+    raise ValueError("JSON payload is not an object")
 
 
 def _success_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:

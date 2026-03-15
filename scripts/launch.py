@@ -302,7 +302,7 @@ class WorkflowLauncher:
             else:
                 self.launch_subprocess()
 
-    def _signal_handler(self, signum, frame) -> None:
+    def _signal_handler(self, signum: int, frame: object | None) -> None:
         """Handle interrupt signals."""
         print("\n\nReceived interrupt signal. Cleaning up...")
         self._cleanup()
@@ -320,7 +320,7 @@ class WorkflowLauncher:
                     proc.kill()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Cross-platform launcher for workflow engine agents"
     )

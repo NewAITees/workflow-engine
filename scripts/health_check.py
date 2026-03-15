@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import yaml
 
@@ -274,7 +275,7 @@ def check_config(config_path: Path) -> dict[str, object]:
         return {"ok": False, "message": f"Config file invalid: {exc}"}
 
 
-def run_health_checks() -> dict[str, object]:
+def run_health_checks() -> dict[str, Any]:
     checks = {
         "llm": check_llm_clis(),
         "github": check_github_api(),
@@ -295,13 +296,13 @@ def run_health_checks() -> dict[str, object]:
     }
 
 
-def _print_human(results: dict[str, object]) -> None:
+def _print_human(results: dict[str, Any]) -> None:
     print_header("Workflow Engine Health Check")
 
-    checks = results["checks"]
+    checks = cast(dict[str, Any], results["checks"])
 
     console.rule("[bold]LLM CLI[/bold]")
-    llm_checks = checks["llm"]["checks"]
+    llm_checks = cast(dict[str, dict[str, Any]], checks["llm"]["checks"])
     for name, result in llm_checks.items():
         if result["ok"]:
             print_success(result["message"])
@@ -312,7 +313,7 @@ def _print_human(results: dict[str, object]) -> None:
                 print_error(str(details["error"]))
 
     console.rule("[bold]GitHub API[/bold]")
-    gh = checks["github"]["checks"]["rate_limit"]
+    gh = cast(dict[str, Any], checks["github"]["checks"]["rate_limit"])
     if gh["ok"]:
         print_success(gh["message"])
     else:
@@ -322,7 +323,8 @@ def _print_human(results: dict[str, object]) -> None:
             print_error(str(details["error"]))
 
     console.rule("[bold]Agent Runtime[/bold]")
-    for agent, status in checks["agents"]["checks"].items():
+    agent_checks = cast(dict[str, dict[str, Any]], checks["agents"]["checks"])
+    for agent, status in agent_checks.items():
         label = f"{agent}: {status['message']}"
         if status["ok"]:
             print_success(label)
@@ -330,7 +332,7 @@ def _print_human(results: dict[str, object]) -> None:
             print_error(label)
 
     console.rule("[bold]Configuration[/bold]")
-    config_result = checks["config"]
+    config_result = cast(dict[str, Any], checks["config"])
     if config_result.get("ok"):
         if config_result.get("warning"):
             print_warning(str(config_result["message"]))
