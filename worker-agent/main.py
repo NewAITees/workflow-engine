@@ -415,9 +415,14 @@ class WorkerAgent:
                 test_commit_result = issue_git.commit(test_commit_msg)
 
                 if not test_commit_result.success:
-                    raise RuntimeError(
-                        f"Test commit failed: {test_commit_result.error}"
-                    )
+                    if test_commit_result.error == "No changes to commit":
+                        logger.info(
+                            f"[{self.agent_id}] No test file changes detected (no-op), skipping test commit."
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"Test commit failed: {test_commit_result.error}"
+                        )
 
                 # TDD Step 2-4: Implementation with test retry loop
                 validation_failure_output = ""
