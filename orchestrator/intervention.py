@@ -347,12 +347,12 @@ Return the new spec text only (markdown), no preamble."""
         if anomaly.pr_number:
             lines.append(f"PR: #{anomaly.pr_number}")
 
-        _FAILURE_COMMENT_PREFIXES: dict[AnomalyType, str] = {
+        failure_comment_prefixes: dict[AnomalyType, str] = {
             AnomalyType.FAILURE_LOOP: "❌ **Processing failed**",
             AnomalyType.CI_LOOP: "⚠️ **CI failed**",
         }
 
-        prefix = _FAILURE_COMMENT_PREFIXES.get(anomaly.anomaly_type)
+        prefix = failure_comment_prefixes.get(anomaly.anomaly_type)
         if prefix and anomaly.issue_number is not None:
             try:
                 comments = self.github.get_issue_comments(anomaly.issue_number)
