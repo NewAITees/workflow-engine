@@ -239,7 +239,7 @@ class TestBuildContextNoIssueNumber:
 
 
 class TestBuildContextOtherAnomalyTypes:
-    """Other anomaly types (e.g. STUCK_ISSUE, SPEC_BLOAT) are not enriched."""
+    """Other anomaly types (e.g. STALE_IMPLEMENTING, SPEC_BLOAT) are not enriched."""
 
     @pytest.mark.parametrize(
         "anomaly_type",
