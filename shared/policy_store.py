@@ -247,7 +247,7 @@ class PolicyStore:
     def _try_load_sqlite_vec(self) -> bool:
         """Attempt to load sqlite-vec extension. Returns True on success."""
         try:
-            import sqlite_vec
+            import sqlite_vec  # type: ignore[import-untyped, unused-ignore]
 
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)

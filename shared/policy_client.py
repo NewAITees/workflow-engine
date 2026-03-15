@@ -44,7 +44,7 @@ class OpenAIEmbeddingBackend(EmbeddingBackend):
 
     def __init__(self, api_key: str | None = None):
         try:
-            import openai
+            import openai  # type: ignore[import-untyped, unused-ignore]
 
             self._client = openai.OpenAI(api_key=api_key)
         except ImportError as e:
