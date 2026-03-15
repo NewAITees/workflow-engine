@@ -18,6 +18,7 @@ from pathlib import Path
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from orchestrator.human_loop import HumanLoopService
 from orchestrator.intervention import InterventionService
 from orchestrator.monitor import MonitorService
 from shared.config import get_agent_config
@@ -89,6 +90,7 @@ class Orchestrator:
     _running: bool = field(default=False, init=False)
     _monitor: MonitorService = field(init=False)
     _intervention: InterventionService = field(init=False)
+    _human_loop: HumanLoopService = field(init=False)
 
     def __post_init__(self) -> None:
         uv = self._find_uv()
@@ -97,6 +99,7 @@ class Orchestrator:
         github = GitHubClient(self.repo)
         self._monitor = MonitorService(github)
         self._intervention = InterventionService(github)
+        self._human_loop = HumanLoopService(github)
 
         self.agents = [
             AgentProcess(
@@ -160,9 +163,18 @@ class Orchestrator:
                     )
 
         try:
+            # Check if any human-reviewed issues have been resolved
+            self._human_loop.sync()
+
             snapshot = self._monitor.take_snapshot()
             anomalies = self._monitor.detect_anomalies(snapshot, agent_crashes=crashed)
             for anomaly in anomalies:
+                # Skip issues already waiting for human action
+                if anomaly.issue_number and self._human_loop.is_paused(
+                    anomaly.issue_number
+                ):
+                    logger.debug(f"Skipping paused issue #{anomaly.issue_number}")
+                    continue
                 try:
                     plan = self._intervention.decide(anomaly)
                     self._intervention.execute(plan)
@@ -199,6 +211,11 @@ def main() -> None:
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument(
+        "--show-decisions",
+        action="store_true",
+        help="Print intervention decision log and exit (requires a running session log)",
+    )
 
     args = parser.parse_args()
 
@@ -212,6 +229,11 @@ def main() -> None:
         repo=args.repo,
         check_interval=args.check_interval,
     )
+
+    if args.show_decisions:
+        print(orchestrator._intervention.show_decisions())
+        return
+
     orchestrator.start()
 
 

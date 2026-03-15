@@ -59,6 +59,7 @@ class InterventionService:
         self.model = model
         self.client = anthropic.Anthropic()
         self._intervention_counts: dict[int, int] = {}  # issue_num → count
+        self._decision_log: list[InterventionPlan] = []
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -99,6 +100,7 @@ class InterventionService:
             plan.new_spec = self._generate_minimal_spec(anomaly)
 
         logger.info(f"Intervention decided: {plan.action.value} — {plan.reason}")
+        self._decision_log.append(plan)
         return plan
 
     def execute(self, plan: InterventionPlan) -> bool:
@@ -276,3 +278,25 @@ Return the new spec text only (markdown), no preamble."""
 
     def intervention_count(self, issue_num: int) -> int:
         return self._intervention_counts.get(issue_num, 0)
+
+    def show_decisions(self) -> str:
+        """Format the decision log as a human-readable table."""
+        if not self._decision_log:
+            return "No intervention decisions recorded."
+
+        header = f"{'Time':<20} {'Target':<12} {'Action':<15} {'Reason'}"
+        separator = "-" * 80
+        lines = [header, separator]
+
+        for plan in self._decision_log:
+            ts = plan.decided_at.strftime("%Y-%m-%d %H:%M")
+            target = (
+                f"issue#{plan.anomaly.issue_number}"
+                if plan.anomaly.issue_number
+                else f"pr#{plan.anomaly.pr_number}"
+                if plan.anomaly.pr_number
+                else "system"
+            )
+            lines.append(f"{ts:<20} {target:<12} {plan.action.value:<15} {plan.reason}")
+
+        return "\n".join(lines)
