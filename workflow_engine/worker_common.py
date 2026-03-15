@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -217,6 +218,20 @@ def comment_worker_escalation(
     )
 
 
+def _find_uv() -> str:
+    """Resolve the uv executable path, falling back to common install locations."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    for candidate in [
+        Path.home() / ".local" / "bin" / "uv",
+        Path("/usr/local/bin/uv"),
+    ]:
+        if candidate.exists():
+            return str(candidate)
+    return "uv"
+
+
 def _tool_env(agent: Any) -> dict[str, str]:
     """Build env for uv subprocess calls in a worktree.
 
@@ -245,7 +260,7 @@ def run_tests(
 
     try:
         result = subprocess.run(
-            ["uv", "run", "pytest", test_file, "-v", "--tb=short"],
+            [_find_uv(), "run", "pytest", test_file, "-v", "--tb=short"],
             cwd=repo_path,
             env=_tool_env(agent),
             capture_output=True,
@@ -273,10 +288,11 @@ def run_tests(
 
 def auto_format(agent: Any, repo_path: Path) -> None:
     """Run ruff format and ruff check --fix in-place before committing."""
+    uv = _find_uv()
     env = _tool_env(agent)
     for cmd in (
-        ["uv", "run", "ruff", "format", "."],
-        ["uv", "run", "ruff", "check", "--fix", "."],
+        [uv, "run", "ruff", "format", "."],
+        [uv, "run", "ruff", "check", "--fix", "."],
     ):
         try:
             subprocess.run(
@@ -289,10 +305,11 @@ def auto_format(agent: Any, repo_path: Path) -> None:
 def run_quality_checks(agent: Any, git_path: Path | None = None) -> tuple[bool, str]:
     """Run repo-wide quality checks before issue-specific tests."""
     repo_path = git_path or agent.git.path
+    uv = _find_uv()
     env = _tool_env(agent)
     checks = [
-        ("ruff", ["uv", "run", "ruff", "check", "."]),
-        ("mypy", ["uv", "run", "mypy", "."]),
+        ("ruff", [uv, "run", "ruff", "check", "."]),
+        ("mypy", [uv, "run", "mypy", "."]),
     ]
     outputs: list[str] = []
     all_passed = True

@@ -4,9 +4,9 @@ repositories:
   - name: NewAITees/workflow-engine
     poll_interval: 30         # Check every 30 seconds for testing
     work_dir: ~/.workflow-engine/workspaces
-    llm_backend: codex        # Use Codex CLI
+    llm_backend: claude       # Use Claude Code CLI
     codex_cli: codex
-    claude_cli: claude
+    claude_cli: ~/.local/bin/claude
     gh_cli: gh
     log_level: INFO
     auto_merge: true          # Auto-merge approved PRs

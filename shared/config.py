@@ -35,6 +35,9 @@ class AgentConfig:
             self.work_dir = str(Path(self.work_dir).expanduser())
         if self.policy_db is not None:
             self.policy_db = str(Path(self.policy_db).expanduser())
+        # Expand ~ in CLI paths
+        self.codex_cli = str(Path(self.codex_cli).expanduser())
+        self.claude_cli = str(Path(self.claude_cli).expanduser())
         # Validate backend
         if self.llm_backend not in ("codex", "claude"):
             raise ValueError(
