@@ -34,14 +34,6 @@ def _make_issue(
     return Issue(number=number, title=title, body=body, labels=[])
 
 
-def _mock_claude(text: str) -> MagicMock:
-    block = MagicMock()
-    block.text = text
-    msg = MagicMock()
-    msg.content = [block]
-    return msg
-
-
 @pytest.fixture
 def github() -> MagicMock:
     mock = MagicMock()
@@ -55,17 +47,19 @@ def github() -> MagicMock:
 
 @pytest.fixture
 def service(github: MagicMock) -> InterventionService:
-    with patch("orchestrator.intervention.anthropic.Anthropic"):
-        svc = InterventionService(github)
-    return svc
+    return InterventionService(github)
 
 
 class TestDecide:
     def test_returns_plan_from_claude(self, service: InterventionService) -> None:
-        service.client.messages.create.return_value = _mock_claude(
-            json.dumps({"action": "ignore", "reason": "transient", "details": ""})
-        )
-        plan = service.decide(_make_anomaly(AnomalyType.FAILURE_LOOP))
+        with patch.object(
+            service,
+            "_call_claude",
+            return_value=json.dumps(
+                {"action": "ignore", "reason": "transient", "details": ""}
+            ),
+        ):
+            plan = service.decide(_make_anomaly(AnomalyType.FAILURE_LOOP))
 
         assert plan.action == InterventionAction.IGNORE
         assert plan.reason == "transient"
@@ -73,31 +67,36 @@ class TestDecide:
     def test_defaults_to_mark_manual_on_bad_json(
         self, service: InterventionService
     ) -> None:
-        service.client.messages.create.return_value = _mock_claude("not json")
-
-        plan = service.decide(_make_anomaly(AnomalyType.SPEC_BLOAT))
+        with patch.object(service, "_call_claude", return_value="not json"):
+            plan = service.decide(_make_anomaly(AnomalyType.SPEC_BLOAT))
 
         assert plan.action == InterventionAction.MARK_MANUAL
 
     def test_generates_new_spec_for_reset_spec(
         self, service: InterventionService
     ) -> None:
-        service.client.messages.create.side_effect = [
-            _mock_claude(
-                json.dumps({"action": "reset_spec", "reason": "bloated", "details": ""})
-            ),
-            _mock_claude("## Minimal Spec\n- Do one thing"),
-        ]
-        plan = service.decide(_make_anomaly(AnomalyType.SPEC_BLOAT))
+        responses = iter(
+            [
+                json.dumps(
+                    {"action": "reset_spec", "reason": "bloated", "details": ""}
+                ),
+                "## Minimal Spec\n- Do one thing",
+            ]
+        )
+        with patch.object(
+            service, "_call_claude", side_effect=lambda *_: next(responses)
+        ):
+            plan = service.decide(_make_anomaly(AnomalyType.SPEC_BLOAT))
 
         assert plan.action == InterventionAction.RESET_SPEC
         assert plan.new_spec == "## Minimal Spec\n- Do one thing"
 
     def test_parses_json_from_code_block(self, service: InterventionService) -> None:
         wrapped = '```json\n{"action": "ignore", "reason": "ok", "details": ""}\n```'
-        service.client.messages.create.return_value = _mock_claude(wrapped)
-
-        plan = service.decide(_make_anomaly(AnomalyType.AGENT_CRASH, issue_number=None))
+        with patch.object(service, "_call_claude", return_value=wrapped):
+            plan = service.decide(
+                _make_anomaly(AnomalyType.AGENT_CRASH, issue_number=None)
+            )
 
         assert plan.action == InterventionAction.IGNORE
 
@@ -213,3 +212,32 @@ class TestInterventionCount:
         service.execute(plan)
 
         assert service.intervention_count(7) == 2
+
+
+class TestCallClaude:
+    def test_returns_stdout_on_success(self, service: InterventionService) -> None:
+        with patch("orchestrator.intervention.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="response text\n", stderr=""
+            )
+            result = service._call_claude("some prompt")
+        assert result == "response text"
+
+    def test_returns_empty_on_timeout(self, service: InterventionService) -> None:
+        import subprocess
+
+        with patch(
+            "orchestrator.intervention.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("claude", 120),
+        ):
+            result = service._call_claude("prompt")
+        assert result == ""
+
+    def test_returns_empty_when_cli_not_found(
+        self, service: InterventionService
+    ) -> None:
+        with patch(
+            "orchestrator.intervention.subprocess.run", side_effect=FileNotFoundError
+        ):
+            result = service._call_claude("prompt")
+        assert result == ""
