@@ -1287,7 +1287,8 @@ class TestWorkerAgent:
         )
         result = agent._try_process_issue(issue)
 
-        assert result is False
+        # No-op commit is skipped gracefully; flow continues to PR creation
+        assert result is True
         agent.lock.mark_failed.assert_not_called()
         agent._comment_worker_escalation.assert_not_called()
 
