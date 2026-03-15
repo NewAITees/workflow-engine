@@ -6,7 +6,8 @@ import logging
 import sys
 import time
 import uuid
-from collections.abc import Generator
+from contextlib import AbstractContextManager
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -123,10 +124,10 @@ class WorkerAgent:
     def _get_stale_timeout_minutes(self) -> int:
         return worker_common.get_stale_timeout_minutes(self)
 
-    def _parse_github_datetime(self, ts: str | None):
+    def _parse_github_datetime(self, ts: str | None) -> datetime | None:
         return worker_common.parse_github_datetime(self, ts)
 
-    def _get_lock_reference_time(self, number: int):
+    def _get_lock_reference_time(self, number: int) -> datetime | None:
         return worker_common.get_lock_reference_time(self, number)
 
     def _is_stale_lock(self, number: int) -> tuple[bool, float | None]:
@@ -143,7 +144,7 @@ class WorkerAgent:
 
     def _issue_workspace(
         self, issue_number: int, branch_name: str
-    ) -> Generator[GitOperations, None, None]:
+    ) -> AbstractContextManager[GitOperations]:
         return worker_issue_flow.issue_workspace(self, issue_number, branch_name)
 
     def _try_process_issue(self, issue: Issue) -> bool:

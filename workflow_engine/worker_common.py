@@ -84,8 +84,8 @@ def get_pr_recovery_status(agent: Any, pr_number: int) -> str:
     reviews = agent.github.get_pr_reviews(pr_number)
     for review in reversed(reviews):
         if review.get("state") == "CHANGES_REQUESTED":
-            return agent.STATUS_CHANGES_REQUESTED
-    return agent.STATUS_REVIEWING
+            return str(agent.STATUS_CHANGES_REQUESTED)
+    return str(agent.STATUS_REVIEWING)
 
 
 def process_stale_locks(agent: Any) -> bool:
