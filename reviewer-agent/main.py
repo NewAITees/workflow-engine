@@ -203,7 +203,11 @@ class ReviewerAgent:
 
                 self.github.remove_pr_label(pr.number, self.STATUS_IN_REVIEW)
                 self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
-                self.github.request_changes_pr(pr.number, feedback)
+                if not self.github.request_changes_pr(pr.number, feedback):
+                    # Fallback: post as comment if GraphQL review fails (e.g. own PR)
+                    self.github.comment_pr(
+                        pr.number, f"🔍 **Review Feedback**\n\n{feedback}"
+                    )
                 return True
 
             if minor_trivial:
@@ -230,7 +234,10 @@ class ReviewerAgent:
 
                     self.github.remove_pr_label(pr.number, self.STATUS_IN_REVIEW)
                     self.github.add_pr_label(pr.number, self.STATUS_CHANGES_REQUESTED)
-                    self.github.request_changes_pr(pr.number, feedback)
+                    if not self.github.request_changes_pr(pr.number, feedback):
+                        self.github.comment_pr(
+                            pr.number, f"🔍 **Review Feedback**\n\n{feedback}"
+                        )
                     self._clear_accumulated_fixes(pr.number)
                     return True
                 else:
