@@ -23,6 +23,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.action_pack import (
     ActionPack,
+    Blocker,
+    CheckResult,
+    TaskContext,
     build_action_pack,
     classify_commit_result,
     parse_mypy_output,
@@ -473,7 +476,7 @@ class WorkerAgent:
                             f"Implementation commit failed: {impl_commit_result.error}"
                         )
                     if commit_status == "no_op":
-                        commit_check = {
+                        commit_check: CheckResult = {
                             "name": "commit",
                             "exit_code": 1,
                             "result": "no_op",
@@ -909,7 +912,7 @@ Once clarified, please update the issue and change label from `status:needs-clar
             f"ESCALATION:worker\n\nReason: {reason}\n\n{details}",
         )
 
-    def _build_task_context(self, issue_number: int, attempt: int = 1) -> dict:
+    def _build_task_context(self, issue_number: int, attempt: int = 1) -> TaskContext:
         """Build Action Pack task context."""
         return {
             "repo": self.repo,
@@ -1100,7 +1103,7 @@ Once clarified, please update the issue and change label from `status:needs-clar
                 if commit_status == "failed":
                     raise RuntimeError(f"Commit failed: {commit_result.error}")
                 if commit_status == "no_op":
-                    commit_check = {
+                    commit_check: CheckResult = {
                         "name": "commit",
                         "exit_code": 1,
                         "result": "no_op",
@@ -1493,8 +1496,8 @@ Please analyze and fix the CI failures.
             ("mypy", ["uv", "run", "mypy", "."]),
         ]
         outputs: list[str] = []
-        check_results = []
-        blockers = []
+        check_results: list[CheckResult] = []
+        blockers: list[Blocker] = []
         all_passed = True
 
         for check_name, cmd in checks:
