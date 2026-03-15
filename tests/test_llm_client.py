@@ -248,8 +248,12 @@ class TestLLMClient:
             "Generate policy candidates ONLY when a recurring and reproducible pattern"
             in prompt
         )
-        assert "Do NOT generate policy candidates for isolated or one-off issues" in prompt
-        assert "Each item in rules[] MUST be a single concrete action sentence" in prompt
+        assert (
+            "Do NOT generate policy candidates for isolated or one-off issues" in prompt
+        )
+        assert (
+            "Each item in rules[] MUST be a single concrete action sentence" in prompt
+        )
 
     @patch.object(LLMClient, "_run")
     def test_review_response_keeps_valid_policy_candidates(self, mock_run):
@@ -313,13 +317,17 @@ class TestLLMClient:
 
         config = AgentConfig(repo="owner/repo", llm_backend="codex")
         client = LLMClient(config)
-        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        result = client.review_code_with_severity(
+            "Spec", "diff", "ctx", Path("/tmp/test")
+        )
         payload = json.loads(result.output)
 
         assert payload["policy_candidates"] == []
 
     @patch.object(LLMClient, "_run")
-    def test_review_response_missing_policy_candidates_defaults_to_empty(self, mock_run):
+    def test_review_response_missing_policy_candidates_defaults_to_empty(
+        self, mock_run
+    ):
         """Missing policy_candidates should normalize to an empty list."""
         mock_run.return_value = MagicMock(
             success=True,
@@ -328,7 +336,9 @@ class TestLLMClient:
 
         config = AgentConfig(repo="owner/repo", llm_backend="codex")
         client = LLMClient(config)
-        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        result = client.review_code_with_severity(
+            "Spec", "diff", "ctx", Path("/tmp/test")
+        )
         payload = json.loads(result.output)
 
         assert payload["policy_candidates"] == []
@@ -343,13 +353,17 @@ class TestLLMClient:
 
         config = AgentConfig(repo="owner/repo", llm_backend="codex")
         client = LLMClient(config)
-        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        result = client.review_code_with_severity(
+            "Spec", "diff", "ctx", Path("/tmp/test")
+        )
         payload = json.loads(result.output)
 
         assert payload["policy_candidates"] == []
 
     @patch.object(LLMClient, "_run")
-    def test_review_response_wrong_policy_candidates_type_defaults_to_empty(self, mock_run):
+    def test_review_response_wrong_policy_candidates_type_defaults_to_empty(
+        self, mock_run
+    ):
         """Non-list policy_candidates should normalize to an empty list."""
         mock_run.return_value = MagicMock(
             success=True,
@@ -358,7 +372,9 @@ class TestLLMClient:
 
         config = AgentConfig(repo="owner/repo", llm_backend="codex")
         client = LLMClient(config)
-        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        result = client.review_code_with_severity(
+            "Spec", "diff", "ctx", Path("/tmp/test")
+        )
         payload = json.loads(result.output)
 
         assert payload["policy_candidates"] == []
@@ -391,7 +407,9 @@ class TestLLMClient:
 
         config = AgentConfig(repo="owner/repo", llm_backend="codex")
         client = LLMClient(config)
-        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        result = client.review_code_with_severity(
+            "Spec", "diff", "ctx", Path("/tmp/test")
+        )
         payload = json.loads(result.output)
 
         assert payload["policy_candidates"] == [
@@ -431,7 +449,9 @@ class TestLLMClient:
 
         config = AgentConfig(repo="owner/repo", llm_backend="codex")
         client = LLMClient(config)
-        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        result = client.review_code_with_severity(
+            "Spec", "diff", "ctx", Path("/tmp/test")
+        )
         payload = json.loads(result.output)
 
         assert payload["policy_candidates"] == [
@@ -471,7 +491,9 @@ class TestLLMClient:
 
         config = AgentConfig(repo="owner/repo", llm_backend="codex")
         client = LLMClient(config)
-        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        result = client.review_code_with_severity(
+            "Spec", "diff", "ctx", Path("/tmp/test")
+        )
         payload = json.loads(result.output)
 
         assert payload["policy_candidates"] == []
