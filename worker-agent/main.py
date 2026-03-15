@@ -421,6 +421,7 @@ class WorkerAgent:
                 test_commit_msg = (
                     f"test: add tests for #{issue.number}\n\n{issue.title}"
                 )
+                self._auto_format(issue_git.path)
                 test_commit_result = issue_git.commit(test_commit_msg)
 
                 if not test_commit_result.success:
@@ -464,6 +465,7 @@ class WorkerAgent:
 
                     # Commit implementation
                     logger.info(f"[{self.agent_id}] Committing implementation...")
+                    self._auto_format(issue_git.path)
                     impl_commit_msg = f"feat: implement #{issue.number} (attempt {test_retry_count + 1})\n\n{issue.title}"
                     impl_commit_result = issue_git.commit(impl_commit_msg)
 
@@ -660,6 +662,7 @@ Please analyze and fix the CI failures.
                         break
 
                     # Commit CI fix
+                    self._auto_format(issue_git.path)
                     fix_commit_msg = f"fix: address CI failures for #{issue.number} (attempt {ci_retry_count})\n\n{ci_logs[:200]}"
                     fix_commit_result = issue_git.commit(fix_commit_msg)
 
@@ -1028,6 +1031,7 @@ Once clarified, please update the issue and change label from `status:needs-clar
                     f"(retry {retry_count + 1}, test attempt {test_retry_count + 1})\n\n"
                     f"{feedback[:500]}"
                 )
+                self._auto_format(self.git.path)
                 commit_result = self.git.commit(commit_msg)
 
                 if not commit_result.success:
@@ -1181,6 +1185,7 @@ Please analyze and fix the CI failures.
                     break
 
                 # Commit CI fix
+                self._auto_format(self.git.path)
                 fix_commit_msg = f"fix: address CI failures for PR #{pr.number} (attempt {ci_retry_count})\n\n{ci_logs[:200]}"
                 fix_commit_result = self.git.commit(fix_commit_msg)
 
@@ -1356,6 +1361,19 @@ Please analyze and fix the CI failures.
             logger.error(f"[{self.agent_id}] {error_msg}")
             return False, error_msg
 
+    def _auto_format(self, repo_path: Path) -> None:
+        """Run ruff format and ruff check --fix in-place before committing."""
+        for cmd in [
+            ["uv", "run", "ruff", "format", "."],
+            ["uv", "run", "ruff", "check", "--fix", "."],
+        ]:
+            try:
+                subprocess.run(
+                    cmd, cwd=repo_path, capture_output=True, text=True, timeout=120
+                )
+            except Exception:
+                pass  # best-effort; commit will still proceed
+
     def _run_quality_checks(self, git_path: Path | None = None) -> tuple[bool, str]:
         """Run repo-wide quality checks before issue-specific tests."""
         repo_path = git_path or self.git.path
@@ -1468,6 +1486,7 @@ Please analyze and fix the CI failures.
                 f"Retry tests still missing after generation: tests/test_issue_{issue.number}.py"
             )
 
+        self._auto_format(self.git.path)
         commit_result = self.git.commit(
             f"test: refresh tests for #{issue.number} before retry\n\n{issue.title}"
         )
