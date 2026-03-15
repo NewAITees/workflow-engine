@@ -321,6 +321,20 @@ Return the new spec text only (markdown), no preamble."""
             return ""
 
     def _build_context(self, anomaly: Anomaly) -> str:
+        """Build a context string for Claude describing the anomaly.
+
+        For FAILURE_LOOP and CI_LOOP anomaly types, fetches the latest matching
+        failure comment from GitHub and appends it to the context. The full
+        context is truncated to 3000 characters.
+
+        Args:
+            anomaly: The anomaly to build context for.
+
+        Returns:
+            A newline-separated context string, at most 3000 characters.
+        """
+        from orchestrator.monitor import AnomalyType
+
         lines = [
             f"Anomaly type: {anomaly.anomaly_type.value}",
             f"Detail: {anomaly.detail}",
@@ -332,7 +346,28 @@ Return the new spec text only (markdown), no preamble."""
             lines.append(f"Previous interventions on this issue: {count}")
         if anomaly.pr_number:
             lines.append(f"PR: #{anomaly.pr_number}")
-        return "\n".join(lines)
+
+        _FAILURE_COMMENT_PREFIXES: dict[AnomalyType, str] = {
+            AnomalyType.FAILURE_LOOP: "❌ **Processing failed**",
+            AnomalyType.CI_LOOP: "⚠️ **CI failed**",
+        }
+
+        prefix = _FAILURE_COMMENT_PREFIXES.get(anomaly.anomaly_type)
+        if prefix and anomaly.issue_number is not None:
+            try:
+                comments = self.github.get_issue_comments(anomaly.issue_number)
+                matched = next(
+                    (c for c in reversed(comments) if c["body"].startswith(prefix)),
+                    None,
+                )
+                if matched:
+                    snippet = matched["body"][:1500]
+                    lines.append(f"latest_failure_comment:\n{snippet}")
+            except Exception as e:
+                logger.warning("Failed to fetch issue comments for context: %s", e)
+
+        context = "\n".join(lines)
+        return context[:3000]
 
     def _format_comment(self, plan: InterventionPlan, extra: str = "") -> str:
         lines = [
