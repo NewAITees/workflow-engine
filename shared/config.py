@@ -22,6 +22,10 @@ class AgentConfig:
     auto_merge: bool = False  # Auto-merge approved PRs
     merge_method: str = "squash"  # "squash", "merge", or "rebase"
     stale_lock_timeout_minutes: int = 30  # Recover stale implementing locks
+    policy_db: str | None = None  # Path to SQLite policy store (shared across projects)
+    policy_server_url: str | None = (
+        None  # Reserved for future server-based policy store
+    )
 
     def __post_init__(self) -> None:
         if self.work_dir is None:
@@ -29,6 +33,8 @@ class AgentConfig:
         else:
             # Expand ~ to home directory
             self.work_dir = str(Path(self.work_dir).expanduser())
+        if self.policy_db is not None:
+            self.policy_db = str(Path(self.policy_db).expanduser())
         # Validate backend
         if self.llm_backend not in ("codex", "claude"):
             raise ValueError(
