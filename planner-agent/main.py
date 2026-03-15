@@ -135,6 +135,7 @@ class PlannerAgent:
 
     def run_once(self) -> bool:
         """Process one escalated issue and return True if handled."""
+        self._check_policy_approvals()
         return self._process_escalations(limit=1)
 
     def run_daemon(self) -> None:
@@ -143,6 +144,7 @@ class PlannerAgent:
         logger.info(f"Poll interval: {self.config.poll_interval}s")
         while True:
             try:
+                self._check_policy_approvals()
                 self._process_escalations(limit=20)
                 time.sleep(self.config.poll_interval)
             except KeyboardInterrupt:
@@ -381,6 +383,48 @@ class PlannerAgent:
                 break
 
         return "\n".join(lines).strip()
+
+    def _check_policy_approvals(self) -> None:
+        """
+        Check for draft policies whose source issue has the 'approve-policy' label.
+
+        When found:
+        - Promotes the policy draft → active via PolicyStore.approve()
+        - Posts a confirmation comment on the linked issue
+        - Removes the 'approve-policy' label
+
+        Skipped silently when policy_db is not configured.
+        """
+        if not self.config.policy_db:
+            return
+
+        store = PolicyStore(self.config.policy_db)
+        try:
+            drafts = store.query(status="draft", limit=100)
+            for policy in drafts:
+                if not policy.source_task:
+                    continue
+
+                issue_num = int(policy.source_task)
+                issue = self.github.get_issue(issue_num)
+                if not issue:
+                    continue
+
+                if "approve-policy" not in (issue.labels or []):
+                    continue
+
+                approved = store.approve(policy.id, approved_by="human")
+                if not approved:
+                    continue
+
+                self.github.comment_issue(
+                    issue_num,
+                    f"✅ Policy `{policy.id}` を active に昇格しました: **{policy.title}**",
+                )
+                self.github.remove_label(issue_num, "approve-policy")
+                logger.info(f"Policy approved via label: {policy.id} — {policy.title}")
+        finally:
+            store.close()
 
     def _get_policies_for_story(self, story: str) -> list[Policy]:
         """Fetch applicable active policies for the given story, if policy_db is configured."""
