@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.config import get_agent_config
 from shared.github_client import GitHubClient, Issue
 from shared.llm_client import LLMClient
+from shared.policy_client import PolicyClient
+from shared.policy_store import Policy, PolicyStore
 
 # Configure logging
 logging.basicConfig(
@@ -380,9 +382,38 @@ class PlannerAgent:
 
         return "\n".join(lines).strip()
 
+    def _get_policies_for_story(self, story: str) -> list[Policy]:
+        """Fetch applicable active policies for the given story, if policy_db is configured."""
+        if not self.config.policy_db:
+            return []
+        store = PolicyStore(self.config.policy_db)
+        try:
+            client = PolicyClient(store)
+            policies = client.get_policies_for_task(story)
+            if policies:
+                titles = ", ".join(p.title for p in policies)
+                logger.info(
+                    f"Injecting {len(policies)} policy/policies into spec: {titles}"
+                )
+            return policies
+        finally:
+            store.close()
+
     def _generate_spec(self, story: str) -> str | None:
-        """Generate a specification from a user story using LLM."""
-        result = self.llm.create_spec(story)
+        """Generate a specification from a user story using LLM, injecting active policies."""
+        policies = self._get_policies_for_story(story)
+        policy_dicts = [
+            {
+                "title": p.title,
+                "why": p.why,
+                "rules": p.rules,
+            }
+            for p in policies
+        ]
+
+        result = self.llm.create_spec(
+            story, policies=policy_dicts if policy_dicts else None
+        )
 
         if not result.success:
             logger.error(f"LLM failed: {result.error}")
