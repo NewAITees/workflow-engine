@@ -468,9 +468,14 @@ class WorkerAgent:
                     impl_commit_result = issue_git.commit(impl_commit_msg)
 
                     if not impl_commit_result.success:
-                        raise RuntimeError(
-                            f"Implementation commit failed: {impl_commit_result.error}"
-                        )
+                        if impl_commit_result.error == "No changes to commit":
+                            logger.info(
+                                f"[{self.agent_id}] Implementation produced no changes (no-op), skipping commit."
+                            )
+                        else:
+                            raise RuntimeError(
+                                f"Implementation commit failed: {impl_commit_result.error}"
+                            )
 
                     # Run quality gate before issue-specific tests
                     logger.info(
@@ -1026,7 +1031,12 @@ Once clarified, please update the issue and change label from `status:needs-clar
                 commit_result = self.git.commit(commit_msg)
 
                 if not commit_result.success:
-                    raise RuntimeError(f"Commit failed: {commit_result.error}")
+                    if commit_result.error == "No changes to commit":
+                        logger.info(
+                            f"[{self.agent_id}] Implementation produced no changes (no-op), skipping commit."
+                        )
+                    else:
+                        raise RuntimeError(f"Commit failed: {commit_result.error}")
 
                 # Run quality gate before issue-specific tests
                 logger.info(f"[{self.agent_id}] Running quality checks (ruff/mypy)...")
