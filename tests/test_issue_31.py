@@ -14,6 +14,14 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_dynamic_modules() -> None:
+    yield
+    for module_name in list(sys.modules):
+        if module_name.startswith(("health_check_issue31_", "launch_issue31_")):
+            sys.modules.pop(module_name, None)
+
+
 def _load_script_module(module_name: str, script_relative_path: str):
     script_path = REPO_ROOT / script_relative_path
     spec = importlib.util.spec_from_file_location(module_name, script_path)
@@ -50,6 +58,11 @@ def test_health_check_supports_json_with_check_breakdown(
 
     monkeypatch.setattr(health_check.shutil, "which", lambda _cmd: "/usr/bin/mock")
     monkeypatch.setattr(health_check.subprocess, "run", _success_run)
+    monkeypatch.setattr(
+        health_check,
+        "check_config",
+        lambda _path: {"ok": True, "message": "mocked config"},
+    )
     monkeypatch.setattr(sys, "argv", ["health_check.py", "--json"])
 
     health_check.main()
@@ -117,6 +130,11 @@ def test_health_check_json_includes_per_agent_runtime_status(
 
     monkeypatch.setattr(health_check.shutil, "which", lambda _cmd: "/usr/bin/mock")
     monkeypatch.setattr(health_check.subprocess, "run", _success_run)
+    monkeypatch.setattr(
+        health_check,
+        "check_config",
+        lambda _path: {"ok": True, "message": "mocked config"},
+    )
     monkeypatch.setattr(sys, "argv", ["health_check.py", "--json"])
 
     health_check.main()

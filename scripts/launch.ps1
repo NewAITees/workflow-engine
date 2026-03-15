@@ -37,7 +37,7 @@ $EngineDir = Split-Path -Parent $ScriptDir
 
 # Health Gate (must pass before any agent starts)
 Write-Host "Running health gate..." -ForegroundColor Cyan
-uv run "$ScriptDir/health_check.py" --json *> $null
+uv run "$ScriptDir/health_check.py" --json > $null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Health gate failed. Startup is blocked." -ForegroundColor Red
     exit 1

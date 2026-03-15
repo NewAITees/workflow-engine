@@ -132,7 +132,14 @@ def _pid_running(pid: int) -> bool:
                 text=True,
             )
             return str(pid) in result.stdout
-        return subprocess.run(["kill", "-0", str(pid)]).returncode == 0
+        return (
+            subprocess.run(
+                ["kill", "-0", str(pid)],
+                capture_output=True,
+                text=True,
+            ).returncode
+            == 0
+        )
     except Exception:
         return False
 
@@ -231,11 +238,13 @@ def check_agents_runtime() -> dict[str, object]:
     systemd_info = _check_systemd_units()
 
     ok = all(bool(status["ok"]) for status in pid_status.values())
+    stale_pids = any(status.get("status") == "stale_pid" for status in pid_status.values())
 
     return {
         "ok": ok,
         "message": "Agent runtime checks passed" if ok else "Agent runtime checks failed",
         "checks": pid_status,
+        "stale_pids": stale_pids,
         "tmux": tmux_info,
         "systemd": systemd_info,
     }
@@ -272,7 +281,13 @@ def run_health_checks() -> dict[str, object]:
         "agents": check_agents_runtime(),
         "config": check_config(project_root / "config" / "repos.yml"),
     }
-    overall_ok = all(bool(group["ok"]) for group in checks.values())
+    agents = checks["agents"]
+    agents_ok = bool(agents["ok"]) or bool(agents.get("stale_pids"))
+    overall_ok = all(
+        bool(group["ok"])
+        for name, group in checks.items()
+        if name != "agents"
+    ) and agents_ok
     return {
         "ok": overall_ok,
         "message": "All health checks passed" if overall_ok else "Health gate failed",

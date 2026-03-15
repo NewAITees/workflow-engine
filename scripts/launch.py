@@ -48,12 +48,18 @@ class WorkflowLauncher:
         health_check_script = self.script_dir / "health_check.py"
         cmd = ["uv", "run", str(health_check_script), "--json"]
         try:
-            subprocess.run(cmd, cwd=self.engine_dir, check=True)
+            subprocess.run(
+                cmd,
+                cwd=self.engine_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         except subprocess.CalledProcessError as exc:
             print("Health gate failed. Startup is blocked.")
-            stderr = getattr(exc, "stderr", None)
-            if stderr:
-                print(stderr)
+            error_output = exc.stderr or exc.stdout
+            if error_output:
+                print(error_output.strip())
             sys.exit(1)
 
     def launch_subprocess(self) -> None:
