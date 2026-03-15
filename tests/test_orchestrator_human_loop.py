@@ -1,7 +1,7 @@
 """Tests for HumanLoopService and show_decisions."""
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -163,9 +163,7 @@ class TestSyncResume:
 
 class TestShowDecisions:
     def _make_service(self) -> InterventionService:
-        with patch("orchestrator.intervention.anthropic.Anthropic"):
-            svc = InterventionService(MagicMock())
-        return svc
+        return InterventionService(MagicMock())
 
     def test_empty_log_message(self) -> None:
         svc = self._make_service()
