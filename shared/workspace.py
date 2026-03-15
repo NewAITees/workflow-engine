@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 class WorkspaceManager:
     """Manages workspaces using git worktrees."""
 
-    def __init__(
-        self, repo: str, main_work_dir: Path, dry_run: str | None = None
-    ):
+    def __init__(self, repo: str, main_work_dir: Path, dry_run: str | None = None):
         self.repo = repo
         self.main_work_dir = main_work_dir
         self.dry_run = dry_run

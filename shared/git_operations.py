@@ -58,9 +58,7 @@ class GitOperations:
         cmd = ["git"] + args
         return " ".join(shlex.quote(part) for part in cmd)
 
-    def _dry_run_write(
-        self, args: list[str], cwd: Path | None = None
-    ) -> GitResult:
+    def _dry_run_write(self, args: list[str], cwd: Path | None = None) -> GitResult:
         """Log suppressed write operation."""
         work_dir = cwd or self.workspace
         logger.info(f"[DRY-RUN] would run: {self._format_cmd(args)}")
@@ -121,7 +119,11 @@ class GitOperations:
             logger.info(f"Cloning repository to: {self.workspace}")
             if self.dry_run:
                 return self._dry_run_write(
-                    ["clone", f"https://github.com/{self.repo}.git", str(self.workspace)],
+                    [
+                        "clone",
+                        f"https://github.com/{self.repo}.git",
+                        str(self.workspace),
+                    ],
                     cwd=self.work_base,
                 )
             return self._run(

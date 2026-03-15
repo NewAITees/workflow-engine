@@ -203,7 +203,9 @@ def test_agent_cli_accepts_and_forwards_dry_run_option(
         agent_instance.create_spec.return_value = None
 
     monkeypatch.setattr(module, agent_name, agent_cls)
-    monkeypatch.setattr(sys, "argv", ["prog", "owner/repo", "--once", "--dry-run=simulate-all"])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "owner/repo", "--once", "--dry-run=simulate-all"]
+    )
 
     with pytest.raises(SystemExit) as exc:
         module.main()

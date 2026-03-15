@@ -38,9 +38,7 @@ class PullRequest:
 class GitHubClient:
     """GitHub operations via gh CLI."""
 
-    def __init__(
-        self, repo: str, gh_cli: str = "gh", dry_run: str | None = None
-    ):
+    def __init__(self, repo: str, gh_cli: str = "gh", dry_run: str | None = None):
         self.repo = repo
         self.gh = gh_cli
         self.dry_run = validate_dry_run_mode(dry_run)

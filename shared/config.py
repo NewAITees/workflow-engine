@@ -16,8 +16,7 @@ def validate_dry_run_mode(dry_run: str | None) -> DryRunMode | None:
         return None
     if dry_run not in ("execute-tests", "simulate-all"):
         raise ValueError(
-            "Invalid dry_run: "
-            f"{dry_run}. Must be 'execute-tests' or 'simulate-all'"
+            f"Invalid dry_run: {dry_run}. Must be 'execute-tests' or 'simulate-all'"
         )
     return cast(DryRunMode, dry_run)
 
