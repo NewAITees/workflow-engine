@@ -3,6 +3,7 @@ Workspace management using git worktrees.
 """
 
 import logging
+import subprocess
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,20 +22,46 @@ class WorkspaceManager:
         # The main 'store' operations
         self.main_git = GitOperations(repo, workspace_path=main_work_dir)
 
+    @property
+    def venv_path(self) -> Path:
+        """Path to the main workspace's virtual environment."""
+        return self.main_work_dir / ".venv"
+
     def ensure_main_repo(self) -> None:
-        """Ensure the main repository exists."""
-        # Check if .git exists to confirm it's a valid repo
+        """Ensure the main repository exists and dev deps are installed."""
         if not (self.main_work_dir / ".git").exists():
             logger.info(f"Cloning main repository to {self.main_work_dir}")
-            # clone_or_pull handles both cases, but we want to be sure
             result = self.main_git.clone_or_pull()
             if not result.success:
                 raise RuntimeError(f"Failed to clone main repo: {result.error}")
-        else:
-            # Just ensure it's up to date
-            # But we might avoid pulling every time to save time?
-            # For now, let's trust clone_or_pull
-            pass
+
+        self._ensure_dev_deps()
+
+    def _ensure_dev_deps(self) -> None:
+        """Install all extras (dev tools: pytest, mypy, ruff) into the main workspace venv.
+
+        Uses UV_PROJECT_ENVIRONMENT so that worktree subprocesses can be pointed
+        at this venv via the same env var, avoiding redundant installs per worktree.
+        """
+        if self.venv_path.exists() and (self.venv_path / "bin" / "pytest").exists():
+            return  # Already installed
+
+        logger.info(f"Installing dev deps in main workspace venv at {self.venv_path}")
+        try:
+            result = subprocess.run(
+                ["uv", "sync", "--all-extras"],
+                cwd=self.main_work_dir,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    f"uv sync --all-extras failed (exit={result.returncode}): "
+                    f"{result.stderr[:500]}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not install dev deps: {e}")
 
     @contextmanager
     def worktree(

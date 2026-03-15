@@ -92,11 +92,14 @@ class LLMClient:
     ) -> list[str]:
         """Build CLI command based on backend."""
         if self.backend == "codex":
-            # Codex CLI command format - use 'exec' for non-interactive mode
-            cmd = [self.cli, "exec", prompt]
+            # codex exec --full-auto <prompt>
+            # --full-auto must come BEFORE the prompt argument; placing it after
+            # causes it to be silently ignored in some codex versions.
+            # --sandbox workspace-write ensures file writes are permitted.
+            cmd = [self.cli, "exec"]
             if allowed_tools:
-                # Codex uses --full-auto for autonomous mode
-                cmd.append("--full-auto")
+                cmd += ["--full-auto", "--sandbox", "workspace-write"]
+            cmd.append(prompt)
             return cmd
         else:
             # Claude Code CLI command format
