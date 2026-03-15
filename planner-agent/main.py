@@ -188,6 +188,9 @@ class PlannerAgent:
         )
         unique_by_number: dict[int, Issue] = {}
         for issue in escalated + failed:
+            # Skip issues already escalated to human — automation should not touch them
+            if "human-review" in issue.labels or "orchestrator-paused" in issue.labels:
+                continue
             unique_by_number[issue.number] = issue
         return list(unique_by_number.values())
 
@@ -395,7 +398,7 @@ class PlannerAgent:
 
         Skipped silently when policy_db is not configured.
         """
-        if not self.config.policy_db:
+        if not isinstance(self.config.policy_db, str) or not self.config.policy_db:
             return
 
         store = PolicyStore(self.config.policy_db)
@@ -428,7 +431,7 @@ class PlannerAgent:
 
     def _get_policies_for_story(self, story: str) -> list[Policy]:
         """Fetch applicable active policies for the given story, if policy_db is configured."""
-        if not self.config.policy_db:
+        if not isinstance(self.config.policy_db, str) or not self.config.policy_db:
             return []
         store = PolicyStore(self.config.policy_db)
         try:

@@ -85,6 +85,10 @@ class PolicyStore:
     """
 
     def __init__(self, db_path: str):
+        if not isinstance(db_path, str):
+            raise TypeError(
+                f"PolicyStore db_path must be a str, got {type(db_path).__name__}: {db_path!r}"
+            )
         self.db_path = str(Path(db_path).expanduser())
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 

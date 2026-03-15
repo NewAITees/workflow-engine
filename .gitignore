@@ -24,3 +24,6 @@ dist/
 .vscode/
 
 *.log
+
+# Artefacts created when a test passes a MagicMock as PolicyStore db_path
+MagicMock/
