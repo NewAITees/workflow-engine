@@ -459,17 +459,38 @@ Start your review."""
             return []
         return [item for item in value if isinstance(item, str)]
 
-    def create_spec(self, story: str) -> LLMResult:
+    def create_spec(
+        self,
+        story: str,
+        policies: list[dict] | None = None,
+    ) -> LLMResult:
         """
         Convert a user story into a technical specification.
 
         Args:
-            story: The user story to convert
+            story:    The user story to convert.
+            policies: Optional list of active Policy dicts to inject into the
+                      prompt so the LLM follows accumulated workflow rules.
 
         Returns:
             LLMResult with the specification
         """
-        prompt = f"""Convert this user story into a detailed technical specification.
+        policy_section = ""
+        if policies:
+            lines = [
+                "\n\n## Applicable Policies",
+                "以下のpolicyを遵守してspecを作成すること:\n",
+            ]
+            for p in policies:
+                lines.append(f"### {p.get('title', '(no title)')}")
+                lines.append(f"**Why:** {p.get('why', '')}")
+                lines.append("**Rules:**")
+                for rule in p.get("rules", []):
+                    lines.append(f"- {rule}")
+                lines.append("")
+            policy_section = "\n".join(lines)
+
+        prompt = f"""Convert this user story into a detailed technical specification.{policy_section}
 
 ## User Story
 {story}
