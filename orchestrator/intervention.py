@@ -21,7 +21,7 @@ from shared.github_client import GitHubClient
 
 logger = logging.getLogger(__name__)
 
-INTERVENTION_MODEL = "claude-opus-4-6"
+INTERVENTION_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
 
 
@@ -29,6 +29,7 @@ class InterventionAction(Enum):
     RESET_SPEC = "reset_spec"  # Rewrite issue body to minimal focused spec
     STOP_WORKER = "stop_worker"  # Pause issue with orchestrator-paused label
     MARK_MANUAL = "mark_manual"  # Escalate to human (human-review label)
+    CREATE_ISSUE = "create_issue"  # File a new status:ready issue for Worker to fix
     IGNORE = "ignore"  # False positive — no action
 
 
@@ -41,6 +42,8 @@ class InterventionPlan:
     details: str
     anomaly: Anomaly
     new_spec: str | None = None  # populated for RESET_SPEC
+    new_issue_title: str | None = None  # populated for CREATE_ISSUE
+    new_issue_body: str | None = None  # populated for CREATE_ISSUE
     decided_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -99,6 +102,11 @@ class InterventionService:
         if plan.action == InterventionAction.RESET_SPEC and anomaly.issue_number:
             plan.new_spec = self._generate_minimal_spec(anomaly)
 
+        if plan.action == InterventionAction.CREATE_ISSUE:
+            plan.new_issue_title, plan.new_issue_body = self._generate_issue_spec(
+                anomaly
+            )
+
         logger.info(f"Intervention decided: {plan.action.value} — {plan.reason}")
         self._decision_log.append(plan)
         return plan
@@ -112,6 +120,8 @@ class InterventionService:
                 return self._do_stop_worker(plan)
             case InterventionAction.MARK_MANUAL:
                 return self._do_mark_manual(plan)
+            case InterventionAction.CREATE_ISSUE:
+                return self._do_create_issue(plan)
             case InterventionAction.IGNORE:
                 logger.info(f"Ignoring anomaly: {plan.anomaly}")
                 return True
@@ -159,6 +169,35 @@ class InterventionService:
         self._increment_count(issue_num)
         return True
 
+    def _do_create_issue(self, plan: InterventionPlan) -> bool:
+        """Create a new GitHub Issue for the Worker to fix automatically."""
+        title = plan.new_issue_title
+        body = plan.new_issue_body
+        if not title or not body:
+            logger.error("CREATE_ISSUE called without title or body")
+            return False
+
+        issue_num = self.github.create_issue(
+            title, body, labels=["status:ready", "orchestrator"]
+        )
+        if not issue_num:
+            logger.error("Failed to create issue")
+            return False
+
+        logger.info(f"Created issue #{issue_num}: {title}")
+
+        # If there's a source issue/PR, comment there to link
+        source = plan.anomaly.issue_number or plan.anomaly.pr_number
+        if source:
+            comment = self._format_comment(
+                plan,
+                extra=f"Created issue #{issue_num} for automated fix. Worker will pick it up shortly.",
+            )
+            self.github.comment_issue(source, comment)
+
+        self._increment_count(issue_num)
+        return True
+
     def _do_mark_manual(self, plan: InterventionPlan) -> bool:
         issue_num = plan.anomaly.issue_number or plan.anomaly.pr_number
         if not issue_num:
@@ -187,7 +226,9 @@ An anomaly has been detected. Decide the best intervention.
 
 ## Available Actions
 - **reset_spec**: Rewrite the issue spec to be simpler and more focused.
-  Use when: spec has bloated, or repeated failures suggest the spec is unclear.
+  Use when: spec is bloated, or repeated failures suggest the spec is unclear.
+- **create_issue**: File a new GitHub Issue (status:ready) for the Worker to fix automatically.
+  Use when: the anomaly reveals a concrete code-level bug or missing feature that can be implemented.
 - **stop_worker**: Pause the issue with an orchestrator-paused label.
   Use when: the issue is consuming resources but cannot be fixed automatically.
 - **mark_manual**: Flag for human review.
@@ -197,7 +238,36 @@ An anomaly has been detected. Decide the best intervention.
 
 ## Response Format
 Respond with JSON only, no other text:
-{{"action": "reset_spec|stop_worker|mark_manual|ignore", "reason": "one sentence", "details": "brief explanation"}}"""
+{{"action": "reset_spec|create_issue|stop_worker|mark_manual|ignore", "reason": "one sentence", "details": "brief explanation"}}"""
+
+    def _generate_issue_spec(self, anomaly: Anomaly) -> tuple[str, str]:
+        """Ask Claude to generate a title and spec body for a new fix issue."""
+        prompt = f"""You are monitoring an AI workflow engine. An anomaly was detected that represents
+a code-level problem that can be fixed automatically by a Worker agent.
+
+## Anomaly
+{self._build_context(anomaly)}
+
+## Task
+Write a GitHub Issue that describes the fix needed.
+The Issue will be picked up by an automated Worker agent, so be precise and actionable.
+
+Respond with JSON only:
+{{"title": "short imperative title (max 60 chars)", "body": "full markdown spec with ## Overview, ## Requirements, ## Acceptance Criteria sections"}}"""
+
+        message = self.client.messages.create(
+            model=self.model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+        try:
+            data = self._extract_json(raw)
+            return data.get(
+                "title", "Fix: automated issue from orchestrator"
+            ), data.get("body", raw)
+        except (json.JSONDecodeError, KeyError):
+            return "Fix: automated issue from orchestrator", raw
 
     def _generate_minimal_spec(self, anomaly: Anomaly) -> str:
         """Ask Claude to write a minimal replacement spec for the issue."""
