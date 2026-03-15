@@ -1,5 +1,6 @@
 """Tests for unified LLM client."""
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -219,7 +220,10 @@ class TestLLMClient:
     @patch.object(LLMClient, "_run")
     def test_review_prompt_includes_test_and_coverage_checks(self, mock_run):
         """Reviewer prompt should enforce test code and coverage gap checks."""
-        mock_run.return_value = MagicMock(success=True, output='{"issues":[]}')
+        mock_run.return_value = MagicMock(
+            success=True,
+            output='{"overall_decision":"approve","issues":[],"summary":"ok"}',
+        )
 
         config = AgentConfig(repo="owner/repo", llm_backend="codex")
         client = LLMClient(config)
@@ -239,3 +243,235 @@ class TestLLMClient:
             "Coverage gaps around critical paths should be reported as at least MAJOR"
             in prompt
         )
+        assert '"policy_candidates"' in prompt
+        assert (
+            "Generate policy candidates ONLY when a recurring and reproducible pattern"
+            in prompt
+        )
+        assert "Do NOT generate policy candidates for isolated or one-off issues" in prompt
+        assert "Each item in rules[] MUST be a single concrete action sentence" in prompt
+
+    @patch.object(LLMClient, "_run")
+    def test_review_response_keeps_valid_policy_candidates(self, mock_run):
+        """Valid policy candidates should be preserved after normalization."""
+        mock_run.return_value = MagicMock(
+            success=True,
+            output=json.dumps(
+                {
+                    "overall_decision": "request_changes",
+                    "issues": [{"severity": "major"}],
+                    "summary": "Found recurring issue",
+                    "policy_candidates": [
+                        {
+                            "title": "Require input validation tests",
+                            "why": "Validation omissions recur",
+                            "trigger_tags": ["tests", "validation"],
+                            "trigger_conditions": ["Missing validation test in diff"],
+                            "rules": [
+                                "Add at least one failing and one passing validation test."
+                            ],
+                            "strength": "high",
+                        }
+                    ],
+                }
+            ),
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+
+        result = client.review_code_with_severity(
+            spec="Spec",
+            diff="diff",
+            repo_context="ctx",
+            work_dir=Path("/tmp/test"),
+        )
+        payload = json.loads(result.output)
+
+        assert payload["overall_decision"] == "request_changes"
+        assert payload["issues"] == [{"severity": "major"}]
+        assert payload["summary"] == "Found recurring issue"
+        assert payload["policy_candidates"][0]["strength"] == "high"
+        assert payload["policy_candidates"][0]["rules"] == [
+            "Add at least one failing and one passing validation test."
+        ]
+
+    @patch.object(LLMClient, "_run")
+    def test_review_response_accepts_explicit_empty_policy_candidates(self, mock_run):
+        """Explicit empty policy_candidates should remain an empty list."""
+        mock_run.return_value = MagicMock(
+            success=True,
+            output=json.dumps(
+                {
+                    "overall_decision": "approve",
+                    "issues": [],
+                    "summary": "No recurring patterns",
+                    "policy_candidates": [],
+                }
+            ),
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        payload = json.loads(result.output)
+
+        assert payload["policy_candidates"] == []
+
+    @patch.object(LLMClient, "_run")
+    def test_review_response_missing_policy_candidates_defaults_to_empty(self, mock_run):
+        """Missing policy_candidates should normalize to an empty list."""
+        mock_run.return_value = MagicMock(
+            success=True,
+            output='{"overall_decision":"approve","issues":[],"summary":"ok"}',
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        payload = json.loads(result.output)
+
+        assert payload["policy_candidates"] == []
+
+    @patch.object(LLMClient, "_run")
+    def test_review_response_null_policy_candidates_defaults_to_empty(self, mock_run):
+        """Null policy_candidates should normalize to an empty list."""
+        mock_run.return_value = MagicMock(
+            success=True,
+            output='{"overall_decision":"approve","issues":[],"summary":"ok","policy_candidates":null}',
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        payload = json.loads(result.output)
+
+        assert payload["policy_candidates"] == []
+
+    @patch.object(LLMClient, "_run")
+    def test_review_response_wrong_policy_candidates_type_defaults_to_empty(self, mock_run):
+        """Non-list policy_candidates should normalize to an empty list."""
+        mock_run.return_value = MagicMock(
+            success=True,
+            output='{"overall_decision":"approve","issues":[],"summary":"ok","policy_candidates":"bad"}',
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        payload = json.loads(result.output)
+
+        assert payload["policy_candidates"] == []
+
+    @patch.object(LLMClient, "_run")
+    def test_review_response_mixed_policy_candidates_are_normalized(self, mock_run):
+        """Mixed valid/invalid entries should normalize deterministically."""
+        mock_run.return_value = MagicMock(
+            success=True,
+            output=json.dumps(
+                {
+                    "overall_decision": "approve",
+                    "issues": [],
+                    "summary": "ok",
+                    "policy_candidates": [
+                        "invalid",
+                        {
+                            "title": "Keep",
+                            "why": "Recurring",
+                            "trigger_tags": ["tag", 123],
+                            "trigger_conditions": ["condition", {}],
+                            "rules": ["Do this.", 7],
+                            "strength": "medium",
+                        },
+                        {"title": "Drop because no rules", "rules": [1, 2]},
+                    ],
+                }
+            ),
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        payload = json.loads(result.output)
+
+        assert payload["policy_candidates"] == [
+            {
+                "title": "Keep",
+                "why": "Recurring",
+                "trigger_tags": ["tag"],
+                "trigger_conditions": ["condition"],
+                "rules": ["Do this."],
+                "strength": "medium",
+            }
+        ]
+
+    @patch.object(LLMClient, "_run")
+    def test_review_response_invalid_fields_and_strength_are_defaulted(self, mock_run):
+        """Invalid field types and invalid strength should use deterministic defaults."""
+        mock_run.return_value = MagicMock(
+            success=True,
+            output=json.dumps(
+                {
+                    "overall_decision": "approve",
+                    "issues": [],
+                    "summary": "ok",
+                    "policy_candidates": [
+                        {
+                            "title": 100,
+                            "why": {"bad": "type"},
+                            "trigger_tags": "bad",
+                            "trigger_conditions": None,
+                            "rules": ["Concrete action."],
+                            "strength": "urgent",
+                        }
+                    ],
+                }
+            ),
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        payload = json.loads(result.output)
+
+        assert payload["policy_candidates"] == [
+            {
+                "title": "",
+                "why": "",
+                "trigger_tags": [],
+                "trigger_conditions": [],
+                "rules": ["Concrete action."],
+                "strength": "low",
+            }
+        ]
+
+    @patch.object(LLMClient, "_run")
+    def test_review_response_candidate_with_empty_rules_is_dropped(self, mock_run):
+        """Candidates with empty normalized rules should be dropped."""
+        mock_run.return_value = MagicMock(
+            success=True,
+            output=json.dumps(
+                {
+                    "overall_decision": "approve",
+                    "issues": [],
+                    "summary": "ok",
+                    "policy_candidates": [
+                        {
+                            "title": "No usable rules",
+                            "why": "Recurring",
+                            "trigger_tags": ["tag"],
+                            "trigger_conditions": ["condition"],
+                            "rules": [1, {}, None],
+                            "strength": "high",
+                        }
+                    ],
+                }
+            ),
+        )
+
+        config = AgentConfig(repo="owner/repo", llm_backend="codex")
+        client = LLMClient(config)
+        result = client.review_code_with_severity("Spec", "diff", "ctx", Path("/tmp/test"))
+        payload = json.loads(result.output)
+
+        assert payload["policy_candidates"] == []
