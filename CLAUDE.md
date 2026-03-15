@@ -45,6 +45,12 @@ uv run planner-agent/main.py owner/repo
 # Planner: Non-interactive mode
 uv run planner-agent/main.py owner/repo --story "Add user search feature"
 
+# Planner: Daemon mode (escalation processing loop)
+uv run planner-agent/main.py owner/repo --daemon
+
+# Planner: Process one escalation only (testing)
+uv run planner-agent/main.py owner/repo --once
+
 # Worker: Daemon mode (polls for status:ready issues)
 uv run worker-agent/main.py owner/repo
 
@@ -56,9 +62,57 @@ uv run reviewer-agent/main.py owner/repo
 
 # Reviewer: Process one PR only (testing)
 uv run reviewer-agent/main.py owner/repo --once --verbose
+
+# Orchestrator: Start all agents and monitor (recommended for production)
+uv run orchestrator/main.py NewAITees/workflow-engine
+
+# Orchestrator: Custom health check interval
+uv run orchestrator/main.py NewAITees/workflow-engine --check-interval 30
+
+# Orchestrator: Verbose mode
+uv run orchestrator/main.py NewAITees/workflow-engine --verbose
+
+# Orchestrator: Show intervention decision log
+uv run orchestrator/main.py NewAITees/workflow-engine --show-decisions
 ```
 
 ## Architecture & Design Patterns
+
+### Orchestrator
+
+The Orchestrator is a supervisor process that manages all three agents as subprocesses and provides anomaly detection and automatic intervention.
+
+**Responsibilities:**
+- Starts planner (`--daemon`), worker, and reviewer as subprocesses
+- Monitors agent health every N seconds (default: 60s)
+- Automatically restarts crashed agents (max 5 restarts per agent)
+- Detects GitHub state anomalies via `MonitorService`
+- Executes interventions via `InterventionService` (e.g. resetting stuck labels)
+- Coordinates human-in-the-loop actions via `HumanLoopService`
+
+**Key classes** (`orchestrator/`):
+- `main.py:Orchestrator` — subprocess manager and monitor loop
+- `monitor.py:MonitorService` — GitHub state snapshot + anomaly detection
+- `intervention.py:InterventionService` — Claude SDK-based decision + execution
+- `human_loop.py:HumanLoopService` — tracks issues paused for human review
+
+**Flow:**
+```
+Orchestrator starts
+    ├── planner --daemon
+    ├── worker
+    └── reviewer
+         ↓ (every check_interval seconds)
+    MonitorService.take_snapshot()
+    MonitorService.detect_anomalies()
+         ↓ (per anomaly)
+    InterventionService.decide()
+    InterventionService.execute()
+```
+
+**Crash recovery:**
+- Agent exit detected → auto-restart with backoff logging
+- After 5 failed restarts → logs error, requires manual intervention
 
 ### GitHub as Message Queue
 

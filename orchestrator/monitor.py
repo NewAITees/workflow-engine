@@ -69,6 +69,8 @@ class MonitorService:
     Tracks implementing_since separately to detect stale locks.
     """
 
+    SUPPRESSED_LABELS = {"human-review", "orchestrator-paused"}
+
     def __init__(self, github: GitHubClient):
         self.github = github
         self._previous: RepoSnapshot | None = None
@@ -167,6 +169,9 @@ class MonitorService:
         """FAILURE_LOOP: issue has 3+ 'Processing failed' comments."""
         anomalies = []
         for issue in current.failed_issues:
+            # Skip issues already handed off to humans or paused
+            if self.SUPPRESSED_LABELS & set(issue.labels):
+                continue
             comments = self.github.get_issue_comments(issue.number, limit=50)
             failure_count = sum(
                 1 for c in comments if "Processing failed" in str(c.get("body", ""))
