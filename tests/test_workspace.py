@@ -40,6 +40,10 @@ class TestWorkspaceManager:
         mock_main_git.worktree_add.return_value = GitResult(success=True, output="")
         mock_main_git.worktree_remove.return_value = GitResult(success=True, output="")
         mock_main_git.worktree_prune.return_value = GitResult(success=True, output="")
+        mock_main_git.fetch_origin.return_value = GitResult(success=True, output="")
+        mock_main_git.ensure_branch_up_to_date.return_value = GitResult(
+            success=True, output=""
+        )
 
         # Setup mock for worktree operations
         mock_worktree_git = MagicMock()
@@ -55,11 +59,14 @@ class TestWorkspaceManager:
             with manager.worktree("feature-branch", "agent-1") as wt_git:
                 assert wt_git == mock_worktree_git
 
-        # Verify add was called
+        # Verify fetch called once, then ensure + add
+        mock_main_git.fetch_origin.assert_called_once()
         mock_main_git.worktree_add.assert_called_once()
         args = mock_main_git.worktree_add.call_args
         assert "agent-1" in str(args[0][0])
         assert args[0][1] == "feature-branch"
+
+        mock_main_git.ensure_branch_up_to_date.assert_called_once_with("main")
 
         # Verify remove was called on exit
         mock_main_git.worktree_remove.assert_called()
@@ -76,6 +83,10 @@ class TestWorkspaceManager:
             GitResult(success=False, output="", error="exists"),
             GitResult(success=True, output="ok"),
         ]
+        mock_main_git.fetch_origin.return_value = GitResult(success=True, output="")
+        mock_main_git.ensure_branch_up_to_date.return_value = GitResult(
+            success=True, output=""
+        )
 
         mock_worktree_git = MagicMock()
         mock_git_cls.side_effect = [mock_main_git, mock_worktree_git]
@@ -86,5 +97,9 @@ class TestWorkspaceManager:
             with manager.worktree("fp", "agent-retry") as wt:
                 assert wt == mock_worktree_git
 
+        # fetch is called once before any worktree attempts
+        mock_main_git.fetch_origin.assert_called_once()
         assert mock_main_git.worktree_add.call_count == 2
         assert mock_main_git.worktree_prune.call_count == 2
+        # ensure_branch_up_to_date is called each time add_wrapped runs
+        assert mock_main_git.ensure_branch_up_to_date.call_count == 2

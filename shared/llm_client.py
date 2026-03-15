@@ -1,9 +1,12 @@
 """Unified LLM client supporting both Codex and Claude Code CLI."""
 
+import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .config import AgentConfig
 
@@ -89,11 +92,14 @@ class LLMClient:
     ) -> list[str]:
         """Build CLI command based on backend."""
         if self.backend == "codex":
-            # Codex CLI command format - use 'exec' for non-interactive mode
-            cmd = [self.cli, "exec", prompt]
+            # codex exec --full-auto <prompt>
+            # --full-auto must come BEFORE the prompt argument; placing it after
+            # causes it to be silently ignored in some codex versions.
+            # --sandbox workspace-write ensures file writes are permitted.
+            cmd = [self.cli, "exec"]
             if allowed_tools:
-                # Codex uses --full-auto for autonomous mode
-                cmd.append("--full-auto")
+                cmd += ["--full-auto", "--sandbox", "workspace-write"]
+            cmd.append(prompt)
             return cmd
         else:
             # Claude Code CLI command format
@@ -286,7 +292,7 @@ Brief summary of the changes
    - **MINOR**: Code style violations, refactoring recommendations
    - **TRIVIAL**: Typos, comments, documentation
 
-3. Return a JSON response with this structure:
+5. Return a JSON response with this structure:
 ```json
 {{
     "overall_decision": "approve or request_changes",
@@ -299,9 +305,24 @@ Brief summary of the changes
             "suggestion": "How to fix it"
         }}
     ],
-    "summary": "Brief overall assessment"
+    "summary": "Brief overall assessment",
+    "policy_candidates": [
+        {{
+            "title": "Short policy title",
+            "why": "Why this recurring pattern matters",
+            "trigger_tags": ["tag1", "tag2"],
+            "trigger_conditions": ["Condition that indicates recurrence"],
+            "rules": ["One concrete action sentence."],
+            "strength": "low|medium|high"
+        }}
+    ]
 }}
 ```
+6. policy_candidates generation constraints:
+   - Generate policy candidates ONLY when a recurring and reproducible pattern is evident.
+   - Do NOT generate policy candidates for isolated or one-off issues.
+   - Each item in rules[] MUST be a single concrete action sentence.
+   - If no recurring pattern exists, return "policy_candidates": [].
 
 ## Decision Rules
 - If ANY critical or major issues exist: overall_decision = "request_changes"
@@ -310,23 +331,169 @@ Brief summary of the changes
 
 Start your review."""
 
-        return self._run(
+        llm_result = self._run(
             prompt,
             work_dir,
             allowed_tools=["Read", "Grep", "Glob"],
         )
 
-    def create_spec(self, story: str) -> LLMResult:
+        if not llm_result.success:
+            return llm_result
+
+        parsed = self._extract_json_object(llm_result.output)
+        normalized_result = {
+            "overall_decision": parsed.get("overall_decision", "approve"),
+            "issues": parsed.get("issues", []),
+            "summary": parsed.get("summary", ""),
+            "policy_candidates": self._normalize_policy_candidates(
+                parsed.get("policy_candidates")
+            ),
+        }
+
+        if normalized_result["overall_decision"] not in {"approve", "request_changes"}:
+            normalized_result["overall_decision"] = "approve"
+        if not isinstance(normalized_result["issues"], list):
+            normalized_result["issues"] = []
+        if not isinstance(normalized_result["summary"], str):
+            normalized_result["summary"] = ""
+
+        return LLMResult(
+            success=True,
+            output=json.dumps(normalized_result),
+            error=llm_result.error,
+        )
+
+    def _extract_json_object(self, output: str) -> dict[str, Any]:
+        """
+        Extract and decode a JSON object from an LLM response.
+
+        Args:
+            output: Raw model output text.
+
+        Returns:
+            Decoded JSON object, or an empty object when parsing fails.
+        """
+        cleaned = output.strip()
+        if not cleaned:
+            return {}
+
+        try:
+            parsed = json.loads(cleaned)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            pass
+
+        fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", cleaned, re.DOTALL)
+        if fence_match:
+            candidate = fence_match.group(1).strip()
+            try:
+                parsed = json.loads(candidate)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                pass
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end <= start:
+            return {}
+
+        try:
+            parsed = json.loads(cleaned[start : end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _normalize_policy_candidates(self, value: Any) -> list[dict[str, Any]]:
+        """
+        Normalize policy_candidates into a deterministic list of candidate objects.
+
+        Args:
+            value: Raw policy_candidates value from model output.
+
+        Returns:
+            List of normalized policy candidate dictionaries.
+        """
+        if not isinstance(value, list):
+            return []
+
+        normalized_candidates: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            normalized_rules = self._normalize_string_list(item.get("rules"))
+            if not normalized_rules:
+                continue
+
+            strength = item.get("strength")
+            if strength not in {"low", "medium", "high"}:
+                strength = "low"
+
+            normalized_candidates.append(
+                {
+                    "title": item.get("title")
+                    if isinstance(item.get("title"), str)
+                    else "",
+                    "why": item.get("why") if isinstance(item.get("why"), str) else "",
+                    "trigger_tags": self._normalize_string_list(
+                        item.get("trigger_tags")
+                    ),
+                    "trigger_conditions": self._normalize_string_list(
+                        item.get("trigger_conditions")
+                    ),
+                    "rules": normalized_rules,
+                    "strength": strength,
+                }
+            )
+
+        return normalized_candidates
+
+    def _normalize_string_list(self, value: Any) -> list[str]:
+        """
+        Normalize a value into a list containing only string elements.
+
+        Args:
+            value: Raw list-like value from model output.
+
+        Returns:
+            String-only list; non-list inputs become an empty list.
+        """
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, str)]
+
+    def create_spec(
+        self,
+        story: str,
+        policies: list[dict] | None = None,
+    ) -> LLMResult:
         """
         Convert a user story into a technical specification.
 
         Args:
-            story: The user story to convert
+            story:    The user story to convert.
+            policies: Optional list of active Policy dicts to inject into the
+                      prompt so the LLM follows accumulated workflow rules.
 
         Returns:
             LLMResult with the specification
         """
-        prompt = f"""Convert this user story into a detailed technical specification.
+        policy_section = ""
+        if policies:
+            lines = [
+                "\n\n## Applicable Policies",
+                "以下のpolicyを遵守してspecを作成すること:\n",
+            ]
+            for p in policies:
+                lines.append(f"### {p.get('title', '(no title)')}")
+                lines.append(f"**Why:** {p.get('why', '')}")
+                lines.append("**Rules:**")
+                for rule in p.get("rules", []):
+                    lines.append(f"- {rule}")
+                lines.append("")
+            policy_section = "\n".join(lines)
+
+        prompt = f"""Convert this user story into a detailed technical specification.{policy_section}
 
 ## User Story
 {story}

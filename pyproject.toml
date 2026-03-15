@@ -9,8 +9,10 @@ description = "AI-powered autonomous development workflow engine"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.40.0",
     "pyyaml>=6.0",
     "rich>=14.3.1",
+    "sqlite-vec>=0.1.6",
 ]
 
 [project.scripts]
@@ -37,6 +39,7 @@ ignore = ["E501"]
 "planner-agent/**/*.py" = ["E402", "N999"]
 "reviewer-agent/**/*.py" = ["E402", "N999"]
 "worker-agent/**/*.py" = ["E402", "N999"]
+"orchestrator/**/*.py" = ["E402", "N999"]
 "tests/**/*.py" = ["E402"]
 
 [tool.mypy]
@@ -44,13 +47,17 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
-exclude = ["scripts/", "planner-agent/", "worker-agent/", "reviewer-agent/", "tests/"]
+exclude = ["scripts/", "planner-agent/", "worker-agent/", "reviewer-agent/", "orchestrator/", "tests/"]
 
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
 ignore_missing_imports = true
 warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+module = ["sqlite_vec", "openai"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

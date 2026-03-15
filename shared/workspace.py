@@ -3,11 +3,12 @@ Workspace management using git worktrees.
 """
 
 import logging
+import subprocess
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
-from shared.git_operations import GitOperations
+from shared.git_operations import GitOperations, GitResult
 
 logger = logging.getLogger(__name__)
 
@@ -21,20 +22,46 @@ class WorkspaceManager:
         # The main 'store' operations
         self.main_git = GitOperations(repo, workspace_path=main_work_dir)
 
+    @property
+    def venv_path(self) -> Path:
+        """Path to the main workspace's virtual environment."""
+        return self.main_work_dir / ".venv"
+
     def ensure_main_repo(self) -> None:
-        """Ensure the main repository exists."""
-        # Check if .git exists to confirm it's a valid repo
+        """Ensure the main repository exists and dev deps are installed."""
         if not (self.main_work_dir / ".git").exists():
             logger.info(f"Cloning main repository to {self.main_work_dir}")
-            # clone_or_pull handles both cases, but we want to be sure
             result = self.main_git.clone_or_pull()
             if not result.success:
                 raise RuntimeError(f"Failed to clone main repo: {result.error}")
-        else:
-            # Just ensure it's up to date
-            # But we might avoid pulling every time to save time?
-            # For now, let's trust clone_or_pull
-            pass
+
+        self._ensure_dev_deps()
+
+    def _ensure_dev_deps(self) -> None:
+        """Install all extras (dev tools: pytest, mypy, ruff) into the main workspace venv.
+
+        Uses UV_PROJECT_ENVIRONMENT so that worktree subprocesses can be pointed
+        at this venv via the same env var, avoiding redundant installs per worktree.
+        """
+        if self.venv_path.exists() and (self.venv_path / "bin" / "pytest").exists():
+            return  # Already installed
+
+        logger.info(f"Installing dev deps in main workspace venv at {self.venv_path}")
+        try:
+            result = subprocess.run(
+                ["uv", "sync", "--all-extras"],
+                cwd=self.main_work_dir,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    f"uv sync --all-extras failed (exit={result.returncode}): "
+                    f"{result.stderr[:500]}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not install dev deps: {e}")
 
     @contextmanager
     def worktree(
@@ -72,12 +99,25 @@ class WorkspaceManager:
             # If remove failed or it wasn't a worktree but a dir, force remove dir?
             # Git worktree remove should handle cleaning the entry.
 
-        result = self.main_git.worktree_add(
-            worktree_path,
-            branch,
-            create_branch=create_branch,
-            base_branch=base_branch,
-        )
+        # Fetch once before any branch sync / worktree creation
+        fetch_result = self.main_git.fetch_origin()
+        if not fetch_result.success:
+            raise RuntimeError(f"Failed to fetch origin: {fetch_result.error}")
+
+        def add_wrapped(create_flag: bool) -> GitResult:
+            sync_result = self.main_git.ensure_branch_up_to_date(base_branch)
+            if not sync_result.success:
+                raise RuntimeError(
+                    f"Failed to sync base branch '{base_branch}': {sync_result.error}"
+                )
+            return self.main_git.worktree_add(
+                worktree_path,
+                branch,
+                create_branch=create_flag,
+                base_branch=base_branch,
+            )
+
+        result = add_wrapped(create_branch)
         if not result.success:
             # Try pruning and retry - sometimes metadata gets stale
             logger.warning(
@@ -87,12 +127,12 @@ class WorkspaceManager:
 
             # If the branch is already checked out, we might need to detach or force.
             # But for now, let's assume standard behavior.
-            result = self.main_git.worktree_add(
-                worktree_path,
-                branch,
-                create_branch=create_branch,
-                base_branch=base_branch,
-            )
+            try:
+                result = add_wrapped(False)
+            except RuntimeError as inner_error:
+                raise RuntimeError(
+                    f"Failed to recreate worktree: {inner_error}"
+                ) from inner_error
 
             if not result.success:
                 raise RuntimeError(f"Failed to create worktree: {result.error}")

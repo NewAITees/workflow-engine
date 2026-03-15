@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.config import get_agent_config
 from shared.github_client import GitHubClient, Issue
 from shared.llm_client import LLMClient
+from shared.policy_client import PolicyClient
+from shared.policy_store import Policy, PolicyStore
 
 # Configure logging
 logging.basicConfig(
@@ -74,7 +76,7 @@ class PlannerAgent:
                 print(
                     f"\n🤔 Generating specification with {self.config.llm_backend}..."
                 )
-                spec = self._generate_spec(story)
+                spec, policy_ids = self._generate_spec(story)
 
                 if not spec:
                     print("❌ Failed to generate specification")
@@ -103,6 +105,7 @@ class PlannerAgent:
                     if issue_num:
                         print(f"\n✅ Issue #{issue_num} created!")
                         print(f"   https://github.com/{self.repo}/issues/{issue_num}")
+                        self._record_policy_application(issue_num, policy_ids)
                     else:
                         print("\n❌ Failed to create issue")
                 else:
@@ -117,7 +120,7 @@ class PlannerAgent:
 
     def create_spec(self, story: str) -> str | None:
         """Create a specification from a story (non-interactive)."""
-        spec = self._generate_spec(story)
+        spec, policy_ids = self._generate_spec(story)
         if not spec:
             return None
 
@@ -129,11 +132,13 @@ class PlannerAgent:
         )
 
         if issue_num:
+            self._record_policy_application(issue_num, policy_ids)
             return f"Issue #{issue_num} created: https://github.com/{self.repo}/issues/{issue_num}"
         return None
 
     def run_once(self) -> bool:
         """Process one escalated issue and return True if handled."""
+        self._check_policy_approvals()
         return self._process_escalations(limit=1)
 
     def run_daemon(self) -> None:
@@ -142,6 +147,7 @@ class PlannerAgent:
         logger.info(f"Poll interval: {self.config.poll_interval}s")
         while True:
             try:
+                self._check_policy_approvals()
                 self._process_escalations(limit=20)
                 time.sleep(self.config.poll_interval)
             except KeyboardInterrupt:
@@ -185,6 +191,9 @@ class PlannerAgent:
         )
         unique_by_number: dict[int, Issue] = {}
         for issue in escalated + failed:
+            # Skip issues already escalated to human — automation should not touch them
+            if "human-review" in issue.labels or "orchestrator-paused" in issue.labels:
+                continue
             unique_by_number[issue.number] = issue
         return list(unique_by_number.values())
 
@@ -199,15 +208,26 @@ class PlannerAgent:
 
         comments = self.github.get_issue_comments(issue_number, limit=100)
         escalation = self._latest_escalation(comments)
-        if escalation is None and self.STATUS_FAILED in issue.labels:
-            # Auto-bridge failed issues into escalation flow so Planner can retry.
-            if self._create_failed_issue_escalation(issue, comments):
-                comments = self.github.get_issue_comments(issue_number, limit=100)
-                escalation = self._latest_escalation(comments)
+        retry_count, retry_ts = self._latest_planner_retry(comments)
+
+        # Auto-bridge: create new escalation for status:failed issues when
+        # no escalation exists OR the existing one is stale (older than last retry).
+        if self.STATUS_FAILED in issue.labels:
+            stale = False
+            if escalation is not None and retry_ts is not None:
+                esc_ts = self._parse_timestamp(escalation.get("created_at"))
+                stale = esc_ts is not None and esc_ts <= retry_ts
+            if escalation is None or stale:
+                if retry_count >= self.MAX_ESCALATION_RETRIES:
+                    # Already exhausted retries — leave in status:failed
+                    return True
+                if self._create_failed_issue_escalation(issue, comments):
+                    comments = self.github.get_issue_comments(issue_number, limit=100)
+                    escalation = self._latest_escalation(comments)
+
         if escalation is None:
             return False
 
-        retry_count, retry_ts = self._latest_planner_retry(comments)
         escalation_ts = self._parse_timestamp(escalation.get("created_at"))
         if (
             retry_ts is not None
@@ -237,7 +257,7 @@ class PlannerAgent:
             f"## Current Specification\n{issue.body}\n\n"
             f"## Escalation Feedback\n{feedback}\n"
         )
-        revised_spec = self._generate_spec(prompt)
+        revised_spec, policy_ids = self._generate_spec(prompt)
         if not revised_spec:
             self.github.comment_issue(
                 issue.number,
@@ -416,15 +436,105 @@ class PlannerAgent:
 
         return "\n".join(lines).strip()
 
-    def _generate_spec(self, story: str) -> str | None:
-        """Generate a specification from a user story using LLM."""
-        result = self.llm.create_spec(story)
+    def _check_policy_approvals(self) -> None:
+        """
+        Check for draft policies whose source issue has the 'approve-policy' label.
+
+        When found:
+        - Promotes the policy draft → active via PolicyStore.approve()
+        - Posts a confirmation comment on the linked issue
+        - Removes the 'approve-policy' label
+
+        Skipped silently when policy_db is not configured.
+        """
+        if not isinstance(self.config.policy_db, str) or not self.config.policy_db:
+            return
+
+        store = PolicyStore(self.config.policy_db)
+        try:
+            drafts = store.query(status="draft", limit=100)
+            for policy in drafts:
+                if not policy.source_task:
+                    continue
+
+                issue_num = int(policy.source_task)
+                issue = self.github.get_issue(issue_num)
+                if not issue:
+                    continue
+
+                if "approve-policy" not in (issue.labels or []):
+                    continue
+
+                approved = store.approve(policy.id, approved_by="human")
+                if not approved:
+                    continue
+
+                self.github.comment_issue(
+                    issue_num,
+                    f"✅ Policy `{policy.id}` を active に昇格しました: **{policy.title}**",
+                )
+                self.github.remove_label(issue_num, "approve-policy")
+                logger.info(f"Policy approved via label: {policy.id} — {policy.title}")
+        finally:
+            store.close()
+
+    def _get_policies_for_story(self, story: str) -> list[Policy]:
+        """Fetch applicable active policies for the given story, if policy_db is configured.
+
+        Side-effect: increments fired_count for each returned policy.
+        """
+        if not isinstance(self.config.policy_db, str) or not self.config.policy_db:
+            return []
+        store = PolicyStore(self.config.policy_db)
+        try:
+            client = PolicyClient(store)
+            policies = client.get_policies_for_task(story)
+            if policies:
+                titles = ", ".join(p.title for p in policies)
+                logger.info(
+                    f"Injecting {len(policies)} policy/policies into spec: {titles}"
+                )
+                for p in policies:
+                    store.increment_fired(p.id)
+            return policies
+        finally:
+            store.close()
+
+    def _record_policy_application(
+        self, issue_number: int, policy_ids: list[str]
+    ) -> None:
+        """Post a hidden comment recording which policies were applied to this spec."""
+        if not policy_ids:
+            return
+        id_list = ",".join(policy_ids)
+        self.github.comment_issue(issue_number, f"<!-- POLICIES_APPLIED: {id_list} -->")
+
+    def _generate_spec(self, story: str) -> tuple[str | None, list[str]]:
+        """Generate a specification from a user story using LLM, injecting active policies.
+
+        Returns:
+            (spec_text, applied_policy_ids) where spec_text is None on LLM failure.
+        """
+        policies = self._get_policies_for_story(story)
+        policy_ids = [p.id for p in policies]
+        policy_dicts = [
+            {
+                "title": p.title,
+                "why": p.why,
+                "rules": p.rules,
+            }
+            for p in policies
+        ]
+
+        result = self.llm.create_spec(
+            story, policies=policy_dicts if policy_dicts else None
+        )
 
         if not result.success:
             logger.error(f"LLM failed: {result.error}")
-            return None
+            return None, []
 
-        return result.output.strip()
+        return result.output.strip(), policy_ids
 
     def _extract_title(self, story: str, spec: str) -> str:
         """Extract a title from the story or spec."""

@@ -459,22 +459,25 @@ class GitHubClient:
         ]
         result = self._run(args, check=False)
         if result.returncode != 0:
-            return {"checks": [], "all_passed": True}  # No CI means pass
+            return {"checks": [], "all_passed": False, "has_checks": False}
 
         checks = json.loads(result.stdout) if result.stdout else []
 
-        # If no checks, consider it passed (no CI configured)
+        # Empty result is ambiguous: no CI configured or checks not registered yet.
         if not checks:
-            return {"checks": [], "all_passed": True}
+            return {"checks": [], "all_passed": False, "has_checks": False}
 
         # Check if all checks have passed (case-insensitive)
         all_passed = all(c.get("state", "").upper() == "SUCCESS" for c in checks)
 
-        return {"checks": checks, "all_passed": all_passed}
+        return {"checks": checks, "all_passed": all_passed, "has_checks": True}
 
     def is_ci_green(self, pr_number: int) -> bool:
         """Check if all CI checks have passed."""
         result = self.get_pr_checks(pr_number)
+        if not result.get("has_checks", bool(result.get("checks"))):
+            # Backward-compatible behavior: repos without CI should not block review.
+            return True
         return bool(result["all_passed"])
 
     def get_ci_status(self, pr_number: int) -> dict:
@@ -490,10 +493,20 @@ class GitHubClient:
                 'failed_count': number of failed checks
             }
         """
-        # Use GitHub API to get check runs with more details
+        head_sha = self.get_pr_head_sha(pr_number)
+        if not head_sha:
+            return {
+                "status": "none",
+                "conclusion": "none",
+                "checks": [],
+                "pending_count": 0,
+                "failed_count": 0,
+            }
+
+        # Use commit-specific check runs to avoid stale PR-level results.
         args = [
             "api",
-            f"/repos/{self.repo}/commits/pulls/{pr_number}/check-runs",
+            f"/repos/{self.repo}/commits/{head_sha}/check-runs",
             "--jq",
             ".check_runs[] | {name: .name, status: .status, conclusion: .conclusion, "
             "started_at: .started_at, completed_at: .completed_at, html_url: .html_url}",
@@ -589,10 +602,15 @@ class GitHubClient:
                 }
             ]
         """
+        head_sha = self.get_pr_head_sha(pr_number)
+        if not head_sha:
+            logger.warning(f"Could not resolve PR #{pr_number} head SHA for CI logs")
+            return []
+
         # Get detailed check runs with output
         args = [
             "api",
-            f"/repos/{self.repo}/commits/pulls/{pr_number}/check-runs",
+            f"/repos/{self.repo}/commits/{head_sha}/check-runs",
             "--jq",
             '.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out") '
             "| {name: .name, conclusion: .conclusion, html_url: .html_url, "
@@ -614,6 +632,27 @@ class GitHubClient:
                     pass
 
         return failed_checks
+
+    def get_pr_head_sha(self, pr_number: int) -> str | None:
+        """Get current HEAD commit SHA for a PR."""
+        args = [
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            self.repo,
+            "--json",
+            "headRefOid",
+        ]
+        result = self._run(args, check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        head_sha = data.get("headRefOid")
+        return str(head_sha) if head_sha else None
 
     def get_pr_reviews(self, pr_number: int) -> list[dict]:
         """Get reviews for a pull request."""
