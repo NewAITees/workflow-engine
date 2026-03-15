@@ -650,10 +650,15 @@ Please analyze and fix the CI failures.
                     fix_commit_result = issue_git.commit(fix_commit_msg)
 
                     if not fix_commit_result.success:
-                        logger.error(
-                            f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
-                        )
-                        break
+                        if fix_commit_result.error == "No changes to commit":
+                            logger.info(
+                                f"[{self.agent_id}] CI fix produced no changes (no-op), skipping commit."
+                            )
+                        else:
+                            logger.error(
+                                f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
+                            )
+                            break
 
                     # Push fix
                     push_result = issue_git.push(branch_name)
@@ -1161,10 +1166,15 @@ Please analyze and fix the CI failures.
                 fix_commit_result = self.git.commit(fix_commit_msg)
 
                 if not fix_commit_result.success:
-                    logger.error(
-                        f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
-                    )
-                    break
+                    if fix_commit_result.error == "No changes to commit":
+                        logger.info(
+                            f"[{self.agent_id}] CI fix produced no changes (no-op), skipping commit."
+                        )
+                    else:
+                        logger.error(
+                            f"[{self.agent_id}] CI fix commit failed: {fix_commit_result.error}"
+                        )
+                        break
 
                 # Push fix (force push to update PR)
                 push_result = self.git.push(branch_name, force=True)
