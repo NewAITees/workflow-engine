@@ -18,7 +18,9 @@ from pathlib import Path
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from orchestrator.monitor import MonitorService
 from shared.config import get_agent_config
+from shared.github_client import GitHubClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,10 +86,14 @@ class Orchestrator:
     check_interval: int = 60  # seconds between health checks
     agents: list[AgentProcess] = field(default_factory=list)
     _running: bool = field(default=False, init=False)
+    _monitor: MonitorService = field(init=False)
 
     def __post_init__(self) -> None:
         uv = self._find_uv()
         root = str(Path(__file__).parent.parent)
+
+        github = GitHubClient(self.repo)
+        self._monitor = MonitorService(github)
 
         self.agents = [
             AgentProcess(
@@ -137,15 +143,28 @@ class Orchestrator:
             self._check_agent_health()
 
     def _check_agent_health(self) -> None:
-        """Detect crashed agents and restart them."""
+        """Detect crashed agents, restart them, then run GitHub anomaly detection."""
+        crashed: list[str] = []
         for agent in self.agents:
             if not agent.is_alive():
                 exit_code = agent.process.returncode if agent.process else None
                 logger.warning(f"{agent.name} is not running (exit_code={exit_code})")
-                if not agent.restart():
+                if agent.restart():
+                    crashed.append(agent.name)
+                else:
                     logger.error(
                         f"{agent.name} will not be restarted. Manual intervention required."
                     )
+
+        try:
+            snapshot = self._monitor.take_snapshot()
+            anomalies = self._monitor.detect_anomalies(snapshot, agent_crashes=crashed)
+            if anomalies:
+                logger.warning(
+                    f"Detected {len(anomalies)} anomaly(s) — intervention TBD (O-3)"
+                )
+        except Exception as e:
+            logger.error(f"Monitor error: {e}")
 
     def stop(self) -> None:
         """Stop all agents cleanly."""
