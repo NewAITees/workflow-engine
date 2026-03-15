@@ -18,6 +18,7 @@ from pathlib import Path
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from orchestrator.intervention import InterventionService
 from orchestrator.monitor import MonitorService
 from shared.config import get_agent_config
 from shared.github_client import GitHubClient
@@ -87,6 +88,7 @@ class Orchestrator:
     agents: list[AgentProcess] = field(default_factory=list)
     _running: bool = field(default=False, init=False)
     _monitor: MonitorService = field(init=False)
+    _intervention: InterventionService = field(init=False)
 
     def __post_init__(self) -> None:
         uv = self._find_uv()
@@ -94,6 +96,7 @@ class Orchestrator:
 
         github = GitHubClient(self.repo)
         self._monitor = MonitorService(github)
+        self._intervention = InterventionService(github)
 
         self.agents = [
             AgentProcess(
@@ -159,10 +162,12 @@ class Orchestrator:
         try:
             snapshot = self._monitor.take_snapshot()
             anomalies = self._monitor.detect_anomalies(snapshot, agent_crashes=crashed)
-            if anomalies:
-                logger.warning(
-                    f"Detected {len(anomalies)} anomaly(s) — intervention TBD (O-3)"
-                )
+            for anomaly in anomalies:
+                try:
+                    plan = self._intervention.decide(anomaly)
+                    self._intervention.execute(plan)
+                except Exception as e:
+                    logger.error(f"Intervention failed for {anomaly}: {e}")
         except Exception as e:
             logger.error(f"Monitor error: {e}")
 
