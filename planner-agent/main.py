@@ -75,7 +75,7 @@ class PlannerAgent:
                 print(
                     f"\n🤔 Generating specification with {self.config.llm_backend}..."
                 )
-                spec = self._generate_spec(story)
+                spec, policy_ids = self._generate_spec(story)
 
                 if not spec:
                     print("❌ Failed to generate specification")
@@ -104,6 +104,7 @@ class PlannerAgent:
                     if issue_num:
                         print(f"\n✅ Issue #{issue_num} created!")
                         print(f"   https://github.com/{self.repo}/issues/{issue_num}")
+                        self._record_policy_application(issue_num, policy_ids)
                     else:
                         print("\n❌ Failed to create issue")
                 else:
@@ -118,7 +119,7 @@ class PlannerAgent:
 
     def create_spec(self, story: str) -> str | None:
         """Create a specification from a story (non-interactive)."""
-        spec = self._generate_spec(story)
+        spec, policy_ids = self._generate_spec(story)
         if not spec:
             return None
 
@@ -130,6 +131,7 @@ class PlannerAgent:
         )
 
         if issue_num:
+            self._record_policy_application(issue_num, policy_ids)
             return f"Issue #{issue_num} created: https://github.com/{self.repo}/issues/{issue_num}"
         return None
 
@@ -254,7 +256,7 @@ class PlannerAgent:
             f"## Current Specification\n{issue.body}\n\n"
             f"## Escalation Feedback\n{feedback}\n"
         )
-        revised_spec = self._generate_spec(prompt)
+        revised_spec, policy_ids = self._generate_spec(prompt)
         if not revised_spec:
             self.github.comment_issue(
                 issue.number,
@@ -430,7 +432,10 @@ class PlannerAgent:
             store.close()
 
     def _get_policies_for_story(self, story: str) -> list[Policy]:
-        """Fetch applicable active policies for the given story, if policy_db is configured."""
+        """Fetch applicable active policies for the given story, if policy_db is configured.
+
+        Side-effect: increments fired_count for each returned policy.
+        """
         if not isinstance(self.config.policy_db, str) or not self.config.policy_db:
             return []
         store = PolicyStore(self.config.policy_db)
@@ -442,13 +447,29 @@ class PlannerAgent:
                 logger.info(
                     f"Injecting {len(policies)} policy/policies into spec: {titles}"
                 )
+                for p in policies:
+                    store.increment_fired(p.id)
             return policies
         finally:
             store.close()
 
-    def _generate_spec(self, story: str) -> str | None:
-        """Generate a specification from a user story using LLM, injecting active policies."""
+    def _record_policy_application(
+        self, issue_number: int, policy_ids: list[str]
+    ) -> None:
+        """Post a hidden comment recording which policies were applied to this spec."""
+        if not policy_ids:
+            return
+        id_list = ",".join(policy_ids)
+        self.github.comment_issue(issue_number, f"<!-- POLICIES_APPLIED: {id_list} -->")
+
+    def _generate_spec(self, story: str) -> tuple[str | None, list[str]]:
+        """Generate a specification from a user story using LLM, injecting active policies.
+
+        Returns:
+            (spec_text, applied_policy_ids) where spec_text is None on LLM failure.
+        """
         policies = self._get_policies_for_story(story)
+        policy_ids = [p.id for p in policies]
         policy_dicts = [
             {
                 "title": p.title,
@@ -464,9 +485,9 @@ class PlannerAgent:
 
         if not result.success:
             logger.error(f"LLM failed: {result.error}")
-            return None
+            return None, []
 
-        return result.output.strip()
+        return result.output.strip(), policy_ids
 
     def _extract_title(self, story: str, spec: str) -> str:
         """Extract a title from the story or spec."""

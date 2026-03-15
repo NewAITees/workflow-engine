@@ -17,6 +17,8 @@ from enum import Enum
 from pathlib import Path
 from typing import cast
 
+_POLICIES_APPLIED_RE = re.compile(r"<!-- POLICIES_APPLIED: ([^>]+) -->")
+
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -268,6 +270,9 @@ class ReviewerAgent:
             approve_body = f"## Auto-Review by Reviewer Agent ({self.config.llm_backend})\n\n{summary}\n\n✅ Code review passed!"
             self.github.approve_pr(pr.number, approve_body)
 
+            if linked_issue:
+                self._increment_accepted_policies(linked_issue)
+
             if self.config.auto_merge:
                 logger.info(
                     f"Auto-merging PR #{pr.number} with method: {self.config.merge_method}"
@@ -310,7 +315,7 @@ class ReviewerAgent:
         """
         if not candidates:
             return
-        if not self.config.policy_db:
+        if not isinstance(self.config.policy_db, str) or not self.config.policy_db:
             logger.debug("policy_db not configured, skipping policy candidate save")
             return
 
@@ -333,6 +338,36 @@ class ReviewerAgent:
                 )
         finally:
             policy_store.close()
+
+    def _increment_accepted_policies(self, linked_issue: Issue) -> None:
+        """Increment accepted_count for each policy that was applied to this issue's spec.
+
+        Looks for a hidden comment posted by the Planner with applied policy IDs.
+        Skipped silently when policy_db is not configured.
+        """
+        if not isinstance(self.config.policy_db, str) or not self.config.policy_db:
+            return
+
+        comments = self.github.get_issue_comments(linked_issue.number, limit=200)
+        policy_ids: list[str] = []
+        for comment in comments:
+            body = comment.get("body", "")
+            m = _POLICIES_APPLIED_RE.search(body)
+            if m:
+                policy_ids.extend(
+                    pid.strip() for pid in m.group(1).split(",") if pid.strip()
+                )
+
+        if not policy_ids:
+            return
+
+        store = PolicyStore(self.config.policy_db)
+        try:
+            for pid in policy_ids:
+                store.increment_accepted(pid)
+                logger.info(f"Policy accepted: {pid}")
+        finally:
+            store.close()
 
     def _find_linked_issue(self, pr: PullRequest) -> Issue | None:
         """Find the linked issue for a PR."""

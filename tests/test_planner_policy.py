@@ -217,5 +217,6 @@ class TestGenerateSpecWithPolicies:
         agent.llm.create_spec.return_value = LLMResult(
             success=False, output="", error="LLM error"
         )
-        result = agent._generate_spec("story")
-        assert result is None
+        spec, policy_ids = agent._generate_spec("story")
+        assert spec is None
+        assert policy_ids == []
