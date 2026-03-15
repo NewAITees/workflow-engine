@@ -1,18 +1,18 @@
-"""Claude SDK-based intervention logic for the Orchestrator.
+"""Claude Code CLI-based intervention logic for the Orchestrator.
 
 Called only when MonitorService detects an anomaly — never in the normal
-monitoring loop — to keep API costs low.
+monitoring loop — to keep claude invocations minimal.
+Uses `claude -p` subprocess so no ANTHROPIC_API_KEY is required.
 """
 
 import json
 import logging
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-
-import anthropic
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -22,7 +22,6 @@ from shared.github_client import GitHubClient
 logger = logging.getLogger(__name__)
 
 INTERVENTION_MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 1024
 
 
 class InterventionAction(Enum):
@@ -49,18 +48,24 @@ class InterventionPlan:
 
 class InterventionService:
     """
-    Uses Claude SDK to decide and execute interventions on anomalies.
+    Uses Claude Code CLI subprocess to decide and execute interventions on anomalies.
 
     Design:
-    - decide() asks Claude what to do (RESET_SPEC / STOP_WORKER / MARK_MANUAL / IGNORE)
+    - decide() asks Claude what to do (RESET_SPEC / STOP_WORKER / MARK_MANUAL / CREATE_ISSUE / IGNORE)
     - For RESET_SPEC, a second Claude call generates the minimal replacement spec
+    - For CREATE_ISSUE, a second Claude call generates the title + spec body
     - execute() carries out the action and posts a GitHub comment
     """
 
-    def __init__(self, github: GitHubClient, model: str = INTERVENTION_MODEL):
+    def __init__(
+        self,
+        github: GitHubClient,
+        model: str = INTERVENTION_MODEL,
+        claude_cli: str = "claude",
+    ):
         self.github = github
         self.model = model
-        self.client = anthropic.Anthropic()
+        self.claude_cli = claude_cli
         self._intervention_counts: dict[int, int] = {}  # issue_num → count
         self._decision_log: list[InterventionPlan] = []
 
@@ -72,12 +77,7 @@ class InterventionService:
         prompt = self._build_decision_prompt(context)
 
         logger.info(f"Asking Claude to decide intervention for {anomaly}")
-        message = self.client.messages.create(
-            model=self.model,
-            max_tokens=MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = message.content[0].text.strip()
+        raw = self._call_claude(prompt)
 
         try:
             data = self._extract_json(raw)
@@ -255,12 +255,7 @@ The Issue will be picked up by an automated Worker agent, so be precise and acti
 Respond with JSON only:
 {{"title": "short imperative title (max 60 chars)", "body": "full markdown spec with ## Overview, ## Requirements, ## Acceptance Criteria sections"}}"""
 
-        message = self.client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = message.content[0].text.strip()
+        raw = self._call_claude(prompt)
         try:
             data = self._extract_json(raw)
             return data.get(
@@ -296,14 +291,34 @@ The original spec caused repeated implementation failures. Make it shorter, clea
 
 Return the new spec text only (markdown), no preamble."""
 
-        message = self.client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text.strip()
+        return self._call_claude(prompt)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _call_claude(self, prompt: str, timeout: int = 120) -> str:
+        """Call Claude Code CLI subprocess and return text output."""
+        try:
+            result = subprocess.run(
+                [self.claude_cli, "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    f"Claude CLI returned non-zero exit code {result.returncode}: {result.stderr[:200]}"
+                )
+            return result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            logger.error(f"Claude CLI timed out after {timeout}s")
+            return ""
+        except FileNotFoundError:
+            logger.error(f"Claude CLI not found: {self.claude_cli}")
+            return ""
+        except Exception as e:
+            logger.error(f"Claude CLI error: {e}")
+            return ""
 
     def _build_context(self, anomaly: Anomaly) -> str:
         lines = [
