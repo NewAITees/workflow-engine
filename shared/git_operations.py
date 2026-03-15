@@ -234,10 +234,16 @@ class GitOperations:
         clean_result = self._run(["clean", "-fd"])
         return clean_result
 
-    def worktree_remove(self, path: Path) -> GitResult:
-        """Remove a worktree."""
-        # git worktree remove <path>
-        return self._run(["worktree", "remove", str(path)])
+    def worktree_remove(self, path: Path, force: bool = True) -> GitResult:
+        """Remove a worktree.
+
+        Uses --force by default to handle unclean worktrees left by crashed agents.
+        """
+        args = ["worktree", "remove"]
+        if force:
+            args.append("--force")
+        args.append(str(path))
+        return self._run(args)
 
     def worktree_prune(self) -> GitResult:
         """Prune worktree information."""

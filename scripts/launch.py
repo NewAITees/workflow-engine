@@ -35,10 +35,23 @@ class WorkflowLauncher:
         self.is_windows = platform.system() == "Windows"
         self.processes: list[subprocess.Popen] = []
 
+    def _find_uv(self) -> str:
+        """Resolve the uv executable, falling back to common install locations."""
+        found = shutil.which("uv")
+        if found:
+            return found
+        for candidate in [
+            Path.home() / ".local" / "bin" / "uv",
+            Path("/usr/local/bin/uv"),
+        ]:
+            if candidate.exists():
+                return str(candidate)
+        return "uv"
+
     def _build_command(self, agent: str) -> list[str]:
         """Build command for an agent."""
         agent_path = self.engine_dir / f"{agent}-agent" / "main.py"
-        cmd = ["uv", "run", str(agent_path), self.repo]
+        cmd = [self._find_uv(), "run", str(agent_path), self.repo]
         if self.config:
             cmd.extend(["--config", self.config])
         return cmd
